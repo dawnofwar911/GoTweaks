@@ -124,107 +124,84 @@ namespace Shared.IPC
         }
 
         /// <summary>
-        /// Deserializes from JSON string
+        /// Deserializes from JSON string using a fast, robust linear tokenizer.
+        /// Handles nested JSON structures, escaped quotes, and large payloads without regex limits.
         /// </summary>
         public static PipeMessage FromJson(string json)
         {
             var msg = new PipeMessage();
+            if (string.IsNullOrWhiteSpace(json))
+                return msg;
 
             try
             {
-                // Simple JSON parsing - extract key-value pairs
-                // Format: {"RequestId":123,"Command":1,"Function":5,"Content":"value",...}
-                json = json.Trim();
-                if (!json.StartsWith("{") || !json.EndsWith("}"))
+                int index = 0;
+                SkipWhitespace(json, ref index);
+                if (index >= json.Length || json[index] != '{')
                     return msg;
 
-                json = json.Substring(1, json.Length - 2); // Remove { }
+                index++; // Skip opening '{'
 
-                // Parse RequestId
-                var reqIdMatch = Regex.Match(json, @"""RequestId""\s*:\s*(\d+)");
-                if (reqIdMatch.Success)
+                while (index < json.Length)
                 {
-                    msg.RequestId = int.Parse(reqIdMatch.Groups[1].Value);
-                }
+                    SkipWhitespace(json, ref index);
+                    if (index >= json.Length || json[index] == '}')
+                        break;
 
-                // Parse Command
-                var cmdMatch = Regex.Match(json, @"""Command""\s*:\s*(\d+)");
-                if (cmdMatch.Success)
-                {
-                    msg.Command = (Command)int.Parse(cmdMatch.Groups[1].Value);
-                }
-
-                // Parse Function
-                var funcMatch = Regex.Match(json, @"""Function""\s*:\s*(\d+)");
-                if (funcMatch.Success)
-                {
-                    msg.Function = (Function)int.Parse(funcMatch.Groups[1].Value);
-                }
-
-                // Parse Content - can be string, number, or boolean
-                var contentMatch = Regex.Match(json, @"""Content""\s*:\s*""([^""\\]*(\\.[^""\\]*)*)""");
-                if (contentMatch.Success)
-                {
-                    msg.Content = UnescapeJson(contentMatch.Groups[1].Value);
-                }
-                else
-                {
-                    // Try boolean content (true/false)
-                    contentMatch = Regex.Match(json, @"""Content""\s*:\s*(true|false)", RegexOptions.IgnoreCase);
-                    if (contentMatch.Success)
+                    if (json[index] == ',')
                     {
-                        // Store as "True" or "False" for .NET bool.Parse compatibility
-                        msg.Content = contentMatch.Groups[1].Value.ToLower() == "true" ? "True" : "False";
+                        index++;
+                        SkipWhitespace(json, ref index);
                     }
-                    else
+
+                    if (index >= json.Length || json[index] == '}')
+                        break;
+
+                    if (json[index] != '"')
                     {
-                        // Try numeric content
-                        contentMatch = Regex.Match(json, @"""Content""\s*:\s*(-?\d+\.?\d*)");
-                        if (contentMatch.Success)
-                        {
-                            msg.Content = contentMatch.Groups[1].Value;
-                        }
-                    }
-                }
-
-                // Parse other key-value pairs (simplified - handles strings and numbers)
-                var otherMatches = Regex.Matches(json, @"""(\w+)""\s*:\s*(""[^""\\]*(\\.[^""\\]*)*""|-?\d+\.?\d*|true|false|null)");
-                foreach (Match match in otherMatches)
-                {
-                    var key = match.Groups[1].Value;
-                    var value = match.Groups[2].Value;
-
-                    if (key == "Command" || key == "Function" || key == "Content")
+                        index++;
                         continue;
+                    }
 
-                    if (value.StartsWith("\""))
+                    string key = ReadString(json, ref index);
+                    SkipWhitespace(json, ref index);
+
+                    if (index >= json.Length || json[index] != ':')
+                        break;
+
+                    index++; // Skip ':'
+                    SkipWhitespace(json, ref index);
+
+                    object val = ReadValue(json, ref index);
+
+                    if (string.Equals(key, nameof(RequestId), StringComparison.OrdinalIgnoreCase))
                     {
-                        msg.Extra[key] = UnescapeJson(value.Substring(1, value.Length - 2));
+                        if (val is int i) msg.RequestId = i;
+                        else if (val is long l) msg.RequestId = (int)l;
+                        else if (val != null && int.TryParse(val.ToString(), out int parsed)) msg.RequestId = parsed;
                     }
-                    else if (value == "true")
+                    else if (string.Equals(key, nameof(Command), StringComparison.OrdinalIgnoreCase))
                     {
-                        msg.Extra[key] = true;
+                        if (val is int i) msg.Command = (Command)i;
+                        else if (val is long l) msg.Command = (Command)(int)l;
+                        else if (val != null && int.TryParse(val.ToString(), out int parsed)) msg.Command = (Command)parsed;
                     }
-                    else if (value == "false")
+                    else if (string.Equals(key, nameof(Function), StringComparison.OrdinalIgnoreCase))
                     {
-                        msg.Extra[key] = false;
+                        if (val is int i) msg.Function = (Function)i;
+                        else if (val is long l) msg.Function = (Function)(int)l;
+                        else if (val != null && int.TryParse(val.ToString(), out int parsed)) msg.Function = (Function)parsed;
                     }
-                    else if (value == "null")
+                    else if (string.Equals(key, nameof(Content), StringComparison.OrdinalIgnoreCase))
                     {
-                        msg.Extra[key] = null;
-                    }
-                    else if (value.Contains("."))
-                    {
-                        if (double.TryParse(value, out var d))
-                            msg.Extra[key] = d;
+                        if (val is bool b)
+                            msg.Content = b ? "True" : "False";
+                        else
+                            msg.Content = val?.ToString();
                     }
                     else
                     {
-                        // Try long first for large values like UpdatedTime (DateTime.Ticks)
-                        if (long.TryParse(value, out var l))
-                            msg.Extra[key] = l;
-                        else if (int.TryParse(value, out var i))
-                            msg.Extra[key] = i;
+                        msg.Extra[key] = val;
                     }
                 }
             }
@@ -234,6 +211,170 @@ namespace Shared.IPC
             }
 
             return msg;
+        }
+
+        private static void SkipWhitespace(string s, ref int index)
+        {
+            while (index < s.Length && char.IsWhiteSpace(s[index]))
+                index++;
+        }
+
+        private static string ReadString(string s, ref int index)
+        {
+            if (index >= s.Length || s[index] != '"')
+                return string.Empty;
+
+            index++; // Skip opening '"'
+            var sb = new StringBuilder();
+            while (index < s.Length)
+            {
+                char c = s[index++];
+                if (c == '"')
+                {
+                    return sb.ToString();
+                }
+                if (c == '\\' && index < s.Length)
+                {
+                    char next = s[index++];
+                    switch (next)
+                    {
+                        case '"': sb.Append('"'); break;
+                        case '\\': sb.Append('\\'); break;
+                        case '/': sb.Append('/'); break;
+                        case 'b': sb.Append('\b'); break;
+                        case 'f': sb.Append('\f'); break;
+                        case 'n': sb.Append('\n'); break;
+                        case 'r': sb.Append('\r'); break;
+                        case 't': sb.Append('\t'); break;
+                        case 'u':
+                            if (index + 4 <= s.Length)
+                            {
+                                string hex = s.Substring(index, 4);
+                                if (int.TryParse(hex, System.Globalization.NumberStyles.HexNumber, null, out int codePoint))
+                                {
+                                    sb.Append((char)codePoint);
+                                    index += 4;
+                                }
+                                else
+                                {
+                                    sb.Append("\\u").Append(hex);
+                                    index += 4;
+                                }
+                            }
+                            break;
+                        default:
+                            sb.Append(next);
+                            break;
+                    }
+                }
+                else
+                {
+                    sb.Append(c);
+                }
+            }
+            return sb.ToString();
+        }
+
+        private static object ReadValue(string s, ref int index)
+        {
+            if (index >= s.Length) return null;
+
+            char c = s[index];
+            if (c == '"')
+            {
+                return ReadString(s, ref index);
+            }
+            if (c == '{' || c == '[')
+            {
+                return ReadRawJsonStructure(s, ref index, c, c == '{' ? '}' : ']');
+            }
+            if (c == 't' || c == 'T')
+            {
+                if (index + 4 <= s.Length && string.Equals(s.Substring(index, 4), "true", StringComparison.OrdinalIgnoreCase))
+                {
+                    index += 4;
+                    return true;
+                }
+            }
+            if (c == 'f' || c == 'F')
+            {
+                if (index + 5 <= s.Length && string.Equals(s.Substring(index, 5), "false", StringComparison.OrdinalIgnoreCase))
+                {
+                    index += 5;
+                    return false;
+                }
+            }
+            if (c == 'n' || c == 'N')
+            {
+                if (index + 4 <= s.Length && string.Equals(s.Substring(index, 4), "null", StringComparison.OrdinalIgnoreCase))
+                {
+                    index += 4;
+                    return null;
+                }
+            }
+
+            int start = index;
+            bool hasDot = false;
+            while (index < s.Length && s[index] != ',' && s[index] != '}' && s[index] != ']' && !char.IsWhiteSpace(s[index]))
+            {
+                if (s[index] == '.') hasDot = true;
+                index++;
+            }
+            string token = s.Substring(start, index - start);
+
+            if (hasDot && double.TryParse(token, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double d))
+                return d;
+
+            if (long.TryParse(token, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out long l))
+            {
+                if (l >= int.MinValue && l <= int.MaxValue)
+                    return (int)l;
+                return l;
+            }
+
+            return token;
+        }
+
+        private static string ReadRawJsonStructure(string s, ref int index, char openChar, char closeChar)
+        {
+            int start = index;
+            int depth = 0;
+            bool inString = false;
+            while (index < s.Length)
+            {
+                char c = s[index++];
+                if (inString)
+                {
+                    if (c == '\\' && index < s.Length)
+                    {
+                        index++; // Skip escaped char inside string
+                    }
+                    else if (c == '"')
+                    {
+                        inString = false;
+                    }
+                }
+                else
+                {
+                    if (c == '"')
+                    {
+                        inString = true;
+                    }
+                    else if (c == openChar)
+                    {
+                        depth++;
+                    }
+                    else if (c == closeChar)
+                    {
+                        depth--;
+                        if (depth == 0)
+                        {
+                            return s.Substring(start, index - start);
+                        }
+                    }
+                }
+            }
+            return s.Substring(start);
         }
 
         private static string EscapeJson(string s)

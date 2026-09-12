@@ -79,6 +79,7 @@ namespace XboxGamingBar
             }
             if (action != null)
             {
+                action.IsEnabled = true;
                 action.Visibility = installed ? Visibility.Collapsed : Visibility.Visible;
             }
         }
@@ -86,18 +87,21 @@ namespace XboxGamingBar
         private void SetupInstallUsbip_Click(object sender, RoutedEventArgs e)
         {
             if (SetupStatusUsbip != null) SetupStatusUsbip.Text = "Installing...";
+            if (SetupInstallUsbipButton != null) SetupInstallUsbipButton.IsEnabled = false;
             installUsbip?.TriggerInstall();
         }
 
         private void SetupInstallHidHide_Click(object sender, RoutedEventArgs e)
         {
             if (SetupStatusHidHide != null) SetupStatusHidHide.Text = "Installing...";
+            if (SetupInstallHidHideButton != null) SetupInstallHidHideButton.IsEnabled = false;
             installHidHide?.TriggerInstall();
         }
 
         private void SetupInstallPawnIO_Click(object sender, RoutedEventArgs e)
         {
             if (SetupStatusPawnIO != null) SetupStatusPawnIO.Text = "Installing...";
+            if (SetupInstallPawnIOButton != null) SetupInstallPawnIOButton.IsEnabled = false;
             installPawnIO?.TriggerInstall();
         }
 

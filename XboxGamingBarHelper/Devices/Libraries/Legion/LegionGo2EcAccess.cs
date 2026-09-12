@@ -119,6 +119,20 @@ namespace XboxGamingBarHelper.Devices.Libraries.Legion
             return true;
         }
 
+        private int ReadByteUnlocked(ushort address)
+        {
+            if (!SelectAddress(address)) return -1;
+            if (!SuperIoOutB(MAILBOX_INDEX_REG, MAILBOX_PTR_DATA)) return -1;
+            return SuperIoInB(MAILBOX_DATA_REG);
+        }
+
+        private bool WriteByteUnlocked(ushort address, byte value)
+        {
+            if (!SelectAddress(address)) return false;
+            if (!SuperIoOutB(MAILBOX_INDEX_REG, MAILBOX_PTR_DATA)) return false;
+            return SuperIoOutB(MAILBOX_DATA_REG, value);
+        }
+
         /// <summary>
         /// Reads one byte from EC RAM at <paramref name="address"/>. Returns -1 on failure.
         /// </summary>
@@ -127,9 +141,7 @@ namespace XboxGamingBarHelper.Devices.Libraries.Legion
             if (!IsAvailable) return -1;
             lock (_txLock)
             {
-                if (!SelectAddress(address)) return -1;
-                if (!SuperIoOutB(MAILBOX_INDEX_REG, MAILBOX_PTR_DATA)) return -1;
-                return SuperIoInB(MAILBOX_DATA_REG);
+                return ReadByteUnlocked(address);
             }
         }
 
@@ -141,32 +153,40 @@ namespace XboxGamingBarHelper.Devices.Libraries.Legion
             if (!IsAvailable) return false;
             lock (_txLock)
             {
-                if (!SelectAddress(address)) return false;
-                if (!SuperIoOutB(MAILBOX_INDEX_REG, MAILBOX_PTR_DATA)) return false;
-                return SuperIoOutB(MAILBOX_DATA_REG, value);
+                return WriteByteUnlocked(address, value);
             }
         }
 
         /// <summary>
         /// Reads a 16-bit word stored as little-endian (low byte at addr, high at addr+1).
+        /// Holds _txLock across both byte reads to guarantee an atomic 16-bit transaction without tearing.
         /// Returns -1 on failure.
         /// </summary>
         public int ReadWord(ushort address)
         {
-            int lo = ReadByte(address);
-            if (lo < 0) return -1;
-            int hi = ReadByte((ushort)(address + 1));
-            if (hi < 0) return -1;
-            return ((hi & 0xFF) << 8) | (lo & 0xFF);
+            if (!IsAvailable) return -1;
+            lock (_txLock)
+            {
+                int lo = ReadByteUnlocked(address);
+                if (lo < 0) return -1;
+                int hi = ReadByteUnlocked((ushort)(address + 1));
+                if (hi < 0) return -1;
+                return ((hi & 0xFF) << 8) | (lo & 0xFF);
+            }
         }
 
         /// <summary>
         /// Writes a 16-bit word as little-endian (low byte at addr, high at addr+1).
+        /// Holds _txLock across both byte writes to guarantee an atomic 16-bit transaction without tearing.
         /// </summary>
         public bool WriteWord(ushort address, ushort value)
         {
-            return WriteByte(address, (byte)(value & 0xFF))
-                && WriteByte((ushort)(address + 1), (byte)((value >> 8) & 0xFF));
+            if (!IsAvailable) return false;
+            lock (_txLock)
+            {
+                return WriteByteUnlocked(address, (byte)(value & 0xFF))
+                    && WriteByteUnlocked((ushort)(address + 1), (byte)((value >> 8) & 0xFF));
+            }
         }
 
         /// <summary>

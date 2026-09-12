@@ -1,4 +1,4 @@
-﻿using NLog;
+using NLog;
 using Shared.Constants;
 using Shared.Data;
 using Shared.IPC;
@@ -1620,6 +1620,13 @@ namespace XboxGamingBarHelper
                 losslessScalingManager.LosslessScalingEnabled,
                 losslessScalingManager.LosslessScalingCurrentProfile,
                 losslessScalingManager.LosslessScalingScalingType,
+                losslessScalingManager.LosslessScalingSharpness,
+                losslessScalingManager.LosslessScalingFSROptimize,
+                losslessScalingManager.LosslessScalingAnime4KSize,
+                losslessScalingManager.LosslessScalingAnime4KVRS,
+                losslessScalingManager.LosslessScalingScaleMode,
+                losslessScalingManager.LosslessScalingScaleFactor,
+                losslessScalingManager.LosslessScalingAspectRatio,
                 losslessScalingManager.LosslessScalingFrameGenType,
                 losslessScalingManager.LosslessScalingLSFG3Mode,
                 losslessScalingManager.LosslessScalingLSFG3Multiplier,
@@ -1633,6 +1640,15 @@ namespace XboxGamingBarHelper
                 losslessScalingManager.LosslessScalingCreateProfile,
                 losslessScalingManager.LosslessScalingBringToForeground,
                 losslessScalingManager.LosslessScalingLaunch,
+                losslessScalingManager.LosslessScalingSyncMode,
+                losslessScalingManager.LosslessScalingCaptureApi,
+                losslessScalingManager.LosslessScalingDrawFps,
+                losslessScalingManager.LosslessScalingHdrSupport,
+                losslessScalingManager.LosslessScalingGsyncSupport,
+                losslessScalingManager.LosslessScalingResizeBeforeScaling,
+                losslessScalingManager.LosslessScalingLS1Type,
+                losslessScalingManager.LosslessScalingMaxFrameLatency,
+                losslessScalingManager.LosslessScalingResetProfile,
                 settingsManager.AutoStartRTSS,
                 settingsManager.OnScreenDisplayProvider,
                 settingsManager.UseManufacturerWMI,

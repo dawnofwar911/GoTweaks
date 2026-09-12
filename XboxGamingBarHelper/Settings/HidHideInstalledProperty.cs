@@ -19,6 +19,11 @@ namespace XboxGamingBarHelper.Settings
             Logger.Info($"HidHide installed: {Value}");
         }
 
+        public void Refresh()
+        {
+            ForceSetValue(Detect());
+        }
+
         private static bool Detect()
         {
             try

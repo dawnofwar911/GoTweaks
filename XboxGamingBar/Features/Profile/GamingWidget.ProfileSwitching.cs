@@ -1,4 +1,4 @@
-﻿using Microsoft.Gaming.XboxGameBar;
+using Microsoft.Gaming.XboxGameBar;
 using Microsoft.Gaming.XboxGameBar.Input;
 using Microsoft.UI.Xaml.Controls;
 using NLog;
@@ -113,6 +113,11 @@ namespace XboxGamingBar
                 else
                 {
                     candidateProfile = $"Game_{currentGameName}";
+                }
+
+                if (!settings.Containers.ContainsKey($"Profile_{candidateProfile}"))
+                {
+                    SyncProfilesFromHelperXmls();
                 }
 
                 if (settings.Containers.ContainsKey($"Profile_{candidateProfile}"))

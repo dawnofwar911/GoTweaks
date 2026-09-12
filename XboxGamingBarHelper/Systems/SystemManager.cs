@@ -1,4 +1,4 @@
-﻿using NLog;
+using NLog;
 using RTSSSharedMemoryNET;
 using System;
 using System.IO;
@@ -1173,8 +1173,11 @@ namespace XboxGamingBarHelper.Systems
             if (previousRunningGame != currentRunningGame)
             {
                 Logger.Info($"[GameDetection] State change: prev={previousRunningGame.GameId.Name ?? "none"} -> curr={currentRunningGame.GameId.Name ?? "none"}");
-                bool gameChanged = previousRunningGame.GameId != currentRunningGame.GameId;
+                bool pathChanged = !string.Equals(previousRunningGame.GameId.Path, currentRunningGame.GameId.Path, StringComparison.OrdinalIgnoreCase);
+                bool validChanged = previousRunningGame.IsValid() != currentRunningGame.IsValid();
+                bool gameChanged = pathChanged || validChanged;
                 bool foregroundChanged = previousRunningGame.IsForeground != currentRunningGame.IsForeground;
+                bool titleChanged = !string.Equals(previousRunningGame.GameId.Name, currentRunningGame.GameId.Name, StringComparison.Ordinal);
 
                 if (gameChanged)
                 {
@@ -1232,17 +1235,24 @@ namespace XboxGamingBarHelper.Systems
                         Logger.Info($"Running game {previousRunningGame.GameId.Name} stopped.");
                     }
                 }
-                else if (foregroundChanged)
+                else
                 {
-                    Logger.Info($"Game {currentRunningGame.GameId.Name} foreground status changed to {currentRunningGame.IsForeground}.");
-
-                    // Preserve the IconPath from the previous RunningGame since GetRunningGame() doesn't include it
+                    // Same game process running - preserve existing icon path
                     if (!string.IsNullOrEmpty(previousRunningGame.GameId.IconPath))
                     {
                         currentRunningGame.GameId = new GameId(
                             currentRunningGame.GameId.Name,
                             currentRunningGame.GameId.Path,
                             previousRunningGame.GameId.IconPath);
+                    }
+
+                    if (foregroundChanged)
+                    {
+                        Logger.Info($"Game {currentRunningGame.GameId.Name} foreground status changed to {currentRunningGame.IsForeground}.");
+                    }
+                    if (titleChanged)
+                    {
+                        Logger.Debug($"Game title updated: '{previousRunningGame.GameId.Name}' -> '{currentRunningGame.GameId.Name}'");
                     }
                 }
                 RunningGame.SetValue(currentRunningGame);

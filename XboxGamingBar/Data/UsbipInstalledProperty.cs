@@ -11,5 +11,12 @@ namespace XboxGamingBar.Data
         public UsbipInstalledProperty() : base(false, null, Function.Viiper_UsbipInstalled)
         {
         }
+
+        public override bool SetValue(object inValue, long inUpdatedTime)
+        {
+            bool result = base.SetValue(inValue, inUpdatedTime);
+            NotifyPropertyChanged(nameof(Value));
+            return result;
+        }
     }
 }

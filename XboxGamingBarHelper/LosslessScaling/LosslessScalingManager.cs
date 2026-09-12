@@ -183,6 +183,11 @@ namespace XboxGamingBarHelper.LosslessScaling
         private DateTime lastInstalledCheck = DateTime.MinValue;
         private static readonly TimeSpan InstalledRecheckInterval = TimeSpan.FromSeconds(10);
 
+        // Two-way sync: watch Settings.xml for external edits from the LS GUI
+        private FileSystemWatcher settingsWatcher;
+        private System.Threading.Timer settingsWatcherDebounceTimer;
+        private bool isInternalSettingsWrite = false;
+
         public LosslessScalingManager() : base()
         {
             Logger.Info("Initializing Lossless Scaling Manager...");
@@ -244,6 +249,9 @@ namespace XboxGamingBarHelper.LosslessScaling
 
             // Read hotkey from Settings.xml (user may have customized it)
             BuildToggleScalingHotkey();
+
+            // Watch Settings.xml for live changes made in the LS app
+            InitializeSettingsWatcher();
 
             Logger.Info("Lossless Scaling Manager initialized successfully.");
         }
@@ -468,8 +476,11 @@ namespace XboxGamingBarHelper.LosslessScaling
                 {
                     // Fallback to Steam URI if exe not found
                     Logger.Info("Exe not found, falling back to Steam URI launch...");
-                    var uri = new Uri($"steam://rungameid/{STEAM_APP_ID}");
-                    await global::Windows.System.Launcher.LaunchUriAsync(uri);
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = $"steam://rungameid/{STEAM_APP_ID}",
+                        UseShellExecute = true
+                    });
                     await Task.Delay(3000);
 
                     bool success = IsRunning();
@@ -807,7 +818,7 @@ namespace XboxGamingBarHelper.LosslessScaling
         private class LosslessScalingSettings
         {
             public string ScalingType { get; set; } = "Off";
-            public int Sharpness { get; set; } = 50;
+            public int Sharpness { get; set; } = 5;
             public bool FSROptimize { get; set; } = false;
             public string Anime4KSize { get; set; } = "Medium";
             public bool Anime4KVRS { get; set; } = false;
@@ -975,13 +986,55 @@ namespace XboxGamingBarHelper.LosslessScaling
                 }
 
                 settings.ScalingType = profile.Element("ScalingType")?.Value ?? "Off";
-                settings.Sharpness = int.TryParse(profile.Element("Sharpness")?.Value, out int sharpness) ? sharpness : 50;
-                settings.FSROptimize = bool.TryParse(profile.Element("FSROptimize")?.Value?.ToLower(), out bool fsrOpt) && fsrOpt;
-                settings.Anime4KSize = profile.Element("Anime4KSize")?.Value ?? "Medium";
-                settings.Anime4KVRS = bool.TryParse(profile.Element("Anime4KVRS")?.Value?.ToLower(), out bool vrs) && vrs;
-                settings.ScaleMode = profile.Element("ScaleMode")?.Value ?? "Auto";
+
+                // Sharpness in Lossless Scaling is 0..10. If read > 10 (from old bug), normalize/clamp.
+                if (int.TryParse(profile.Element("Sharpness")?.Value, out int sharpness))
+                {
+                    if (sharpness > 10) sharpness = Math.Min(10, (int)Math.Round(sharpness / 10.0));
+                    settings.Sharpness = Math.Max(0, Math.Min(10, sharpness));
+                }
+                else
+                {
+                    settings.Sharpness = 5;
+                }
+
+                // FSRType: "OPTIMIZED" or "DEFAULT" in Settings.xml (fallback to legacy "FSROptimize")
+                string fsrVal = profile.Element("FSRType")?.Value ?? profile.Element("FSROptimize")?.Value;
+                settings.FSROptimize = string.Equals(fsrVal, "OPTIMIZED", StringComparison.OrdinalIgnoreCase) ||
+                                       (bool.TryParse(fsrVal?.ToLower(), out bool fsrB) && fsrB);
+
+                // Anime4kType: "S", "M", "L", "VL", "UL" in Settings.xml (fallback to legacy "Anime4KSize")
+                string rawAnime4K = profile.Element("Anime4kType")?.Value ?? profile.Element("Anime4KSize")?.Value ?? "M";
+                switch (rawAnime4K.ToUpperInvariant())
+                {
+                    case "S": settings.Anime4KSize = "Small"; break;
+                    case "M": settings.Anime4KSize = "Medium"; break;
+                    case "L": settings.Anime4KSize = "Large"; break;
+                    case "VL": settings.Anime4KSize = "Very Large"; break;
+                    case "UL": settings.Anime4KSize = "Ultra Large"; break;
+                    default: settings.Anime4KSize = rawAnime4K; break;
+                }
+
+                // VRS: <VRS> in Settings.xml (fallback to legacy "Anime4KVRS")
+                string vrsVal = profile.Element("VRS")?.Value ?? profile.Element("Anime4KVRS")?.Value;
+                settings.Anime4KVRS = bool.TryParse(vrsVal?.ToLower(), out bool vrs) && vrs;
+
+                // ScalingMode: "Auto", "Custom" in Settings.xml (fallback to legacy "ScaleMode")
+                settings.ScaleMode = profile.Element("ScalingMode")?.Value ?? profile.Element("ScaleMode")?.Value ?? "Auto";
+
                 settings.ScaleFactor = int.TryParse(profile.Element("ScaleFactor")?.Value, out int factor) ? factor : 2;
-                settings.AspectRatio = profile.Element("AspectRatio")?.Value ?? "Aspect Ratio";
+
+                // ScalingFitMode: "AspectRatio", "Fullscreen" in Settings.xml (fallback to legacy "AspectRatio")
+                string fitMode = profile.Element("ScalingFitMode")?.Value ?? profile.Element("AspectRatio")?.Value ?? "AspectRatio";
+                if (string.Equals(fitMode, "AspectRatio", StringComparison.OrdinalIgnoreCase) || string.Equals(fitMode, "Aspect Ratio", StringComparison.OrdinalIgnoreCase))
+                {
+                    settings.AspectRatio = "Aspect Ratio";
+                }
+                else
+                {
+                    settings.AspectRatio = fitMode;
+                }
+
                 settings.FrameGenType = profile.Element("FrameGeneration")?.Value ?? "Off";
                 settings.LSFG3Mode = profile.Element("LSFG3Mode1")?.Value ?? "FIXED";
                 settings.LSFG3Multiplier = int.TryParse(profile.Element("LSFG3Multiplier")?.Value, out int mult) ? mult : 2;
@@ -1014,6 +1067,7 @@ namespace XboxGamingBarHelper.LosslessScaling
 
         private void WriteSettingsToProfile(string profileName)
         {
+            lock (stateLock) { isInternalSettingsWrite = true; }
             try
             {
                 if (!File.Exists(SETTINGS_PATH))
@@ -1034,13 +1088,41 @@ namespace XboxGamingBarHelper.LosslessScaling
 
                 // Update values from current properties
                 SetElementValue(profile, "ScalingType", losslessScalingScalingType.Value);
-                SetElementValue(profile, "Sharpness", losslessScalingSharpness.Value.ToString());
-                SetElementValue(profile, "FSROptimize", losslessScalingFSROptimize.Value.ToString().ToLower());
-                SetElementValue(profile, "Anime4KSize", losslessScalingAnime4KSize.Value);
-                SetElementValue(profile, "Anime4KVRS", losslessScalingAnime4KVRS.Value.ToString().ToLower());
-                SetElementValue(profile, "ScaleMode", losslessScalingScaleMode.Value);
+                SetElementValue(profile, "Sharpness", Math.Max(0, Math.Min(10, losslessScalingSharpness.Value)).ToString());
+
+                // FSRType in LS: OPTIMIZED or DEFAULT
+                SetElementValue(profile, "FSRType", losslessScalingFSROptimize.Value ? "OPTIMIZED" : "DEFAULT");
+                profile.Element("FSROptimize")?.Remove();
+
+                // Anime4kType in LS: S, M, L, VL, UL
+                string animeType = "M";
+                switch (losslessScalingAnime4KSize.Value)
+                {
+                    case "Small": animeType = "S"; break;
+                    case "Medium": animeType = "M"; break;
+                    case "Large": animeType = "L"; break;
+                    case "Very Large": animeType = "VL"; break;
+                    case "Ultra Large": animeType = "UL"; break;
+                    default: animeType = losslessScalingAnime4KSize.Value; break;
+                }
+                SetElementValue(profile, "Anime4kType", animeType);
+                profile.Element("Anime4KSize")?.Remove();
+
+                // VRS in LS
+                SetElementValue(profile, "VRS", losslessScalingAnime4KVRS.Value.ToString().ToLower());
+                profile.Element("Anime4KVRS")?.Remove();
+
+                // ScalingMode in LS: Auto, Custom
+                SetElementValue(profile, "ScalingMode", losslessScalingScaleMode.Value);
+                profile.Element("ScaleMode")?.Remove();
+
                 SetElementValue(profile, "ScaleFactor", losslessScalingScaleFactor.Value.ToString());
-                SetElementValue(profile, "AspectRatio", losslessScalingAspectRatio.Value);
+
+                // ScalingFitMode in LS: AspectRatio, Fullscreen
+                string fitModeToWrite = losslessScalingAspectRatio.Value == "Aspect Ratio" ? "AspectRatio" : losslessScalingAspectRatio.Value;
+                SetElementValue(profile, "ScalingFitMode", fitModeToWrite);
+                profile.Element("AspectRatio")?.Remove();
+
                 SetElementValue(profile, "FrameGeneration", losslessScalingFrameGenType.Value);
                 SetElementValue(profile, "LSFG3Mode1", losslessScalingLSFG3Mode.Value);
                 SetElementValue(profile, "LSFG3Multiplier", losslessScalingLSFG3Multiplier.Value.ToString());
@@ -1067,6 +1149,13 @@ namespace XboxGamingBarHelper.LosslessScaling
             catch (Exception ex)
             {
                 Logger.Error($"Failed to write Settings.xml: {ex.Message}");
+            }
+            finally
+            {
+                Task.Delay(1000).ContinueWith(_ =>
+                {
+                    lock (stateLock) { isInternalSettingsWrite = false; }
+                });
             }
         }
 
@@ -1332,6 +1421,103 @@ namespace XboxGamingBarHelper.LosslessScaling
             {
                 Logger.Error($"Error in LosslessScalingResetProfile_PropertyChanged: {ex.Message}");
             }
+        }
+
+        #endregion
+
+        #region Settings File Watcher
+
+        private void InitializeSettingsWatcher()
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(SETTINGS_PATH);
+                if (!Directory.Exists(dir))
+                {
+                    return;
+                }
+
+                settingsWatcher = new FileSystemWatcher(dir, "Settings.xml")
+                {
+                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime,
+                    EnableRaisingEvents = true
+                };
+
+                settingsWatcher.Changed += OnSettingsFileChanged;
+                settingsWatcher.Created += OnSettingsFileChanged;
+
+                Logger.Info($"Watching Lossless Scaling settings at: {SETTINGS_PATH}");
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Failed to initialize settings watcher for Lossless Scaling: {ex.Message}");
+            }
+        }
+
+        private void OnSettingsFileChanged(object sender, FileSystemEventArgs e)
+        {
+            lock (stateLock)
+            {
+                if (isInternalSettingsWrite)
+                    return;
+            }
+
+            // Debounce multiple rapid file events (500ms)
+            if (settingsWatcherDebounceTimer == null)
+            {
+                settingsWatcherDebounceTimer = new System.Threading.Timer(OnSettingsDebounceFired, null, 500, System.Threading.Timeout.Infinite);
+            }
+            else
+            {
+                settingsWatcherDebounceTimer.Change(500, System.Threading.Timeout.Infinite);
+            }
+        }
+
+        private void OnSettingsDebounceFired(object state)
+        {
+            try
+            {
+                string profileToRead;
+                lock (stateLock)
+                {
+                    if (isInternalSettingsWrite)
+                        return;
+                    profileToRead = currentProfileName;
+                }
+
+                Logger.Info($"Settings.xml modified externally. Reloading profile '{profileToRead}'...");
+                System.Threading.Thread.Sleep(100);
+
+                var settings = ReadSettingsFromProfile(profileToRead);
+                UpdatePropertiesFromSettings(settings);
+
+                // Re-read hotkey in case user changed it in LS GUI
+                BuildToggleScalingHotkey();
+                Logger.Info($"Reloaded profile '{profileToRead}' from Settings.xml successfully.");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Error reloading settings from Settings.xml: {ex.Message}");
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (settingsWatcher != null)
+                {
+                    settingsWatcher.EnableRaisingEvents = false;
+                    settingsWatcher.Dispose();
+                    settingsWatcher = null;
+                }
+                if (settingsWatcherDebounceTimer != null)
+                {
+                    settingsWatcherDebounceTimer.Dispose();
+                    settingsWatcherDebounceTimer = null;
+                }
+            }
+            base.Dispose(disposing);
         }
 
         #endregion

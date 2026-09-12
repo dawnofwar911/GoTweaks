@@ -54,13 +54,7 @@ namespace XboxGamingBarHelper
         /// </summary>
         public static bool EnsureElevated(string[] args)
         {
-            // Debug: Write immediately to see if we even get here
-            try
-            {
-                var debugPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "elevation_debug.txt");
-                File.AppendAllText(debugPath, $"{DateTime.Now}: EnsureElevated called, IsAdmin={IsRunningAsAdmin()}\n");
-            }
-            catch { }
+            Logger.Debug($"EnsureElevated called, IsAdmin={IsRunningAsAdmin()}");
 
             try
             {
@@ -94,30 +88,11 @@ namespace XboxGamingBarHelper
                 Logger.Info($"Running from deployed location: {HelperDeploymentService.IsRunningFromDeployedLocation()}");
                 LogManager.Flush(); // Ensure logs are written before checks
 
-                // Debug: Write to a simple file to diagnose non-admin path
-                try
-                {
-                    var debugPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "elevation_debug.txt");
-                    var debugInfo = $"{DateTime.Now}: ExePath={exePath}\n" +
-                                   $"HelperFolder={HelperDeploymentService.HelperFolder}\n" +
-                                   $"DeployedExePath={HelperDeploymentService.DeployedExePath}\n" +
-                                   $"DeployedExeExists={File.Exists(HelperDeploymentService.DeployedExePath)}\n";
-                    File.AppendAllText(debugPath, debugInfo);
-                }
-                catch { }
+                Logger.Debug($"ExePath={exePath}, HelperFolder={HelperDeploymentService.HelperFolder}, DeployedExeExists={File.Exists(HelperDeploymentService.DeployedExePath)}");
 
                 bool deploymentValid = HelperDeploymentService.IsDeploymentValid();
                 bool deploymentNeeded = HelperDeploymentService.IsDeploymentNeeded();
                 bool taskConfigured = ScheduledTaskService.IsTaskConfiguredCorrectly();
-
-                // Debug: Write check results
-                try
-                {
-                    var debugPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "elevation_debug.txt");
-                    var debugInfo = $"DeploymentValid={deploymentValid}, DeploymentNeeded={deploymentNeeded}, TaskConfigured={taskConfigured}\n\n";
-                    File.AppendAllText(debugPath, debugInfo);
-                }
-                catch { }
 
                 Logger.Info($"Deployment valid: {deploymentValid}, Deployment needed: {deploymentNeeded}, Task configured: {taskConfigured}");
                 LogManager.Flush(); // Ensure logs are written before decision

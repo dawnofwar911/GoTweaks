@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using XboxGamingBarHelper.ControllerEmulation;
+using XboxGamingBarHelper.Core;
 
 namespace XboxGamingBarHelper.Labs
 {
@@ -14,7 +15,9 @@ namespace XboxGamingBarHelper.Labs
     internal static class HidHideHelper
     {
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
-        private const string HidHideWingetId = "NefariusSoftwareSolutions.HidHide";
+        private const string PrimaryHidHideWingetId = "Nefarius.HidHide";
+        private const string FallbackHidHideWingetId = "NefariusSoftwareSolutions.HidHide";
+        private const string HidHideDirectDownloadUrl = "https://github.com/nefarius/HidHide/releases/download/v1.5.230.0/HidHide_1.5.230_x64.exe";
 
         public static bool IsInstalled()
         {
@@ -33,10 +36,14 @@ namespace XboxGamingBarHelper.Labs
             }
 
             Logger.Info("Starting HidHide installation via winget...");
-            if (!TryInstallViaWinget())
+            if (!TryInstallViaWinget(PrimaryHidHideWingetId) && !TryInstallViaWinget(FallbackHidHideWingetId))
             {
-                Logger.Warn("HidHide installation via winget failed");
-                return false;
+                Logger.Warn("HidHide installation via winget failed; attempting direct download fallback...");
+                if (!TryInstallViaDirectDownload())
+                {
+                    Logger.Warn("HidHide installation via direct download failed");
+                    return false;
+                }
             }
 
             bool installed = IsInstalled();
@@ -44,7 +51,7 @@ namespace XboxGamingBarHelper.Labs
             return installed;
         }
 
-        private static bool TryInstallViaWinget()
+        private static bool TryInstallViaWinget(string packageId)
         {
             string localWinget = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -65,7 +72,7 @@ namespace XboxGamingBarHelper.Labs
                     continue;
                 }
 
-                if (RunWingetInstall(candidate))
+                if (RunWingetInstall(candidate, packageId))
                 {
                     return true;
                 }
@@ -74,9 +81,9 @@ namespace XboxGamingBarHelper.Labs
             return false;
         }
 
-        private static bool RunWingetInstall(string executable)
+        private static bool RunWingetInstall(string executable, string packageId)
         {
-            string arguments = $"install --id {HidHideWingetId} -e --accept-package-agreements --accept-source-agreements --silent --disable-interactivity";
+            string arguments = $"install --id {packageId} -e --accept-package-agreements --accept-source-agreements --silent --disable-interactivity";
 
             try
             {
@@ -123,6 +130,73 @@ namespace XboxGamingBarHelper.Labs
             {
                 Logger.Warn($"HidHide installation exception: {ex.Message}");
                 return false;
+            }
+        }
+
+        private static bool TryInstallViaDirectDownload()
+        {
+            string tempPath = Path.Combine(Path.GetTempPath(), "HidHide_1.5.230_x64.exe");
+            try
+            {
+                Logger.Info($"Downloading HidHide installer from {HidHideDirectDownloadUrl}...");
+                using (var client = new TimedWebClient(TimeSpan.FromSeconds(60)))
+                {
+                    client.Headers.Add("User-Agent", "GoTweaks/1.0");
+                    client.DownloadFile(HidHideDirectDownloadUrl, tempPath);
+                }
+
+                Logger.Info($"HidHide installer downloaded to {tempPath}");
+
+                var startInfo = new ProcessStartInfo
+                {
+                    FileName = tempPath,
+                    Arguments = "/quiet /norestart",
+                    UseShellExecute = true,
+                    Verb = "runas",
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                };
+
+                using Process process = Process.Start(startInfo);
+                if (process == null)
+                {
+                    Logger.Warn("Failed to start downloaded HidHide installer (UAC may have been cancelled)");
+                    return false;
+                }
+
+                Logger.Info($"HidHide direct installer started, PID={process.Id}");
+                if (!process.WaitForExit(300000))
+                {
+                    try { process.Kill(); } catch { }
+                    Logger.Warn("HidHide direct installation timed out after 5 minutes");
+                    return false;
+                }
+
+                if (process.ExitCode == 0 || process.ExitCode == 3010)
+                {
+                    Logger.Info($"HidHide direct installer exited with code {process.ExitCode}");
+                    return true;
+                }
+
+                Logger.Warn($"HidHide direct installer failed with exit code {process.ExitCode}");
+                return false;
+            }
+            catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
+            {
+                Logger.Info("HidHide direct installation cancelled by user (UAC prompt declined)");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"HidHide direct installation exception: {ex.Message}");
+                return false;
+            }
+            finally
+            {
+                try
+                {
+                    if (File.Exists(tempPath)) File.Delete(tempPath);
+                }
+                catch { }
             }
         }
     }

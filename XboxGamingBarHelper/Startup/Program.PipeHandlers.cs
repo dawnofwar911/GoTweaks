@@ -1,4 +1,4 @@
-﻿using NLog;
+using NLog;
 using Shared.Constants;
 using Shared.Data;
 using Shared.IPC;
@@ -733,9 +733,15 @@ namespace XboxGamingBarHelper
                     {
                         if (performanceManager != null && !performanceManager.IsAutoTDPActive)
                         {
-                            int currentTdp = performanceManager.TDP.Value;
-                            Logger.Info($"Pipe: ReapplyTDP request — re-pushing current {currentTdp}W to hardware");
-                            performanceManager.SetTDP(currentTdp);
+                            int targetTdp = performanceManager.TDP.Value;
+                            if (pipeMsg.Extra.TryGetValue("TargetTDP", out var targetObj))
+                            {
+                                if (targetObj is int tVal && tVal > 0) targetTdp = tVal;
+                                else if (targetObj is long tLong && tLong > 0) targetTdp = (int)tLong;
+                                else if (targetObj is string tStr && int.TryParse(tStr, out int parsedTdp) && parsedTdp > 0) targetTdp = parsedTdp;
+                            }
+                            Logger.Info($"Pipe: ReapplyTDP request — re-pushing {targetTdp}W to hardware");
+                            performanceManager.SetTDP(targetTdp);
                         }
                     }
                     catch (Exception ex)
@@ -1161,6 +1167,7 @@ namespace XboxGamingBarHelper
                     {
                         bool success = XboxGamingBarHelper.Labs.HidHideHelper.Install();
                         bool installed = XboxGamingBarHelper.Labs.HidHideHelper.IsInstalled();
+                        settingsManager?.HidHideInstalled?.Refresh();
                         var updateMsg = new Shared.IPC.PipeMessage
                         {
                             Command = Shared.Enums.Command.Set,

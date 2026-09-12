@@ -1,4 +1,4 @@
-﻿using Microsoft.Gaming.XboxGameBar;
+using Microsoft.Gaming.XboxGameBar;
 using Microsoft.Gaming.XboxGameBar.Input;
 using Microsoft.UI.Xaml.Controls;
 using NLog;
@@ -1161,6 +1161,10 @@ namespace XboxGamingBar
 
         private bool HasAnyGameProfile(string gameName)
         {
+            if (!HasGameSingleProfile(gameName) && !HasGamePowerSplitProfiles(gameName))
+            {
+                SyncProfilesFromHelperXmls();
+            }
             return HasGameSingleProfile(gameName) || HasGamePowerSplitProfiles(gameName);
         }
 
@@ -1530,7 +1534,7 @@ namespace XboxGamingBar
             losslessScalingEnabled = new LosslessScalingEnabledProperty(LosslessScalingEnabledToggle, this);
             losslessScalingCurrentProfile = new LosslessScalingCurrentProfileProperty();
             losslessScalingScalingType = new LosslessScalingScalingTypeProperty(LosslessScalingScalingTypeComboBox, this);
-            losslessScalingSharpness = new LosslessScalingSharpnessProperty(50, LosslessScalingSharpnessSlider, this);
+            losslessScalingSharpness = new LosslessScalingSharpnessProperty(5, LosslessScalingSharpnessSlider, this);
             losslessScalingFSROptimize = new LosslessScalingFSROptimizeProperty(LosslessScalingFSROptimizeToggle, this);
             losslessScalingAnime4KSize = new LosslessScalingAnime4KSizeProperty(LosslessScalingAnime4KSizeComboBox, this);
             losslessScalingAnime4KVRS = new LosslessScalingAnime4KVRSProperty(LosslessScalingAnime4KVRSToggle, this);
@@ -2193,6 +2197,7 @@ namespace XboxGamingBar
 
             // Check if this is a clean install (no saved Global profile)
             var settings = ApplicationData.Current.LocalSettings;
+            SyncProfilesFromHelperXmls();
             isCleanInstall = !settings.Containers.ContainsKey("Profile_Global");
             if (isCleanInstall)
             {

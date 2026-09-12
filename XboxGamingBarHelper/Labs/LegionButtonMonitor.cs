@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -3257,7 +3257,7 @@ namespace XboxGamingBarHelper.Labs
                                     int h = kv.Key;
                                     sb.Append($"{(byte)(h >> 16):X2}:{(byte)(h >> 8):X2}:{(byte)h:X2}={kv.Value} ");
                                 }
-                                Logger.Info(sb.ToString());
+                                Logger.Debug(sb.ToString());
                                 _hidReportRateCount = 0;
                                 _hidReportRateLastEmitTicks = _rateNow;
                                 _hidReportHeaderCounts.Clear();

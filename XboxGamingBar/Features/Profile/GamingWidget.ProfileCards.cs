@@ -1,4 +1,4 @@
-﻿using Microsoft.Gaming.XboxGameBar;
+using Microsoft.Gaming.XboxGameBar;
 using Microsoft.Gaming.XboxGameBar.Input;
 using Microsoft.UI.Xaml.Controls;
 using NLog;
@@ -79,8 +79,234 @@ namespace XboxGamingBar
             }
         }
 
+        private static string GetXmlVal(System.Xml.Linq.XDocument doc, string elementName)
+        {
+            var el = doc.Descendants(elementName).FirstOrDefault();
+            if (el == null) return null;
+            var nilAttr = el.Attribute(System.Xml.Linq.XNamespace.Get("http://www.w3.org/2001/XMLSchema-instance") + "nil");
+            if (nilAttr != null && (nilAttr.Value == "true" || nilAttr.Value == "1")) return null;
+            return el.Value;
+        }
+
+        private static double GetXmlDouble(System.Xml.Linq.XDocument doc, string elementName, double fallback)
+        {
+            string val = GetXmlVal(doc, elementName);
+            if (!string.IsNullOrEmpty(val) && double.TryParse(val, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out double res))
+                return res;
+            return fallback;
+        }
+
+        private static int GetXmlInt(System.Xml.Linq.XDocument doc, string elementName, int fallback)
+        {
+            string val = GetXmlVal(doc, elementName);
+            if (!string.IsNullOrEmpty(val) && int.TryParse(val, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out int res))
+                return res;
+            return fallback;
+        }
+
+        private static bool GetXmlBool(System.Xml.Linq.XDocument doc, string elementName, bool fallback)
+        {
+            string val = GetXmlVal(doc, elementName);
+            if (!string.IsNullOrEmpty(val) && bool.TryParse(val, out bool res))
+                return res;
+            return fallback;
+        }
+
+        /// <summary>
+        /// Scans LocalState/profiles/*.xml (the helper's on-disk profile store) and ensures
+        /// that every profile has a corresponding Profile_Game_* container in LocalSettings.
+        /// This restores user profiles after MSIX updates, package reinstallations, or
+        /// app data resets where LocalSettings was cleared but LocalState was preserved.
+        /// </summary>
+        internal void SyncProfilesFromHelperXmls()
+        {
+            try
+            {
+                string profilesFolder = Path.Combine(ApplicationData.Current.LocalFolder.Path, "profiles");
+                if (!Directory.Exists(profilesFolder)) return;
+
+                var settings = ApplicationData.Current.LocalSettings;
+                var xmlFiles = Directory.GetFiles(profilesFolder, "*.xml");
+                if (xmlFiles.Length == 0) return;
+
+                int restoredCount = 0;
+
+                foreach (var xmlPath in xmlFiles)
+                {
+                    try
+                    {
+                        var doc = System.Xml.Linq.XDocument.Load(xmlPath);
+                        var gameId = doc.Descendants("GameId").FirstOrDefault();
+                        string rawTitle = gameId?.Element("Name")?.Value;
+                        string fullPath = gameId?.Element("Path")?.Value;
+                        string fileBasename = Path.GetFileNameWithoutExtension(xmlPath);
+
+                        // Resolve a clean, valid title
+                        string title = rawTitle?.Trim();
+                        if (string.IsNullOrEmpty(title) || title.Contains(":\\") || title.Contains(":/"))
+                        {
+                            title = !string.IsNullOrEmpty(fileBasename) ? fileBasename : "Game";
+                        }
+
+                        // Sanitize title for UWP container name: container names cannot contain backslashes or slashes
+                        title = title.Replace('\\', '_').Replace('/', '_').Trim();
+                        if (string.IsNullOrEmpty(title)) continue;
+
+                        var titlesToSeed = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { title };
+                        if (!string.IsNullOrEmpty(rawTitle) && !rawTitle.Contains(":\\") && !rawTitle.Contains(":/"))
+                        {
+                            titlesToSeed.Add(rawTitle.Replace('\\', '_').Replace('/', '_'));
+                        }
+                        if (fileBasename.Equals("SWZeroCompany", StringComparison.OrdinalIgnoreCase))
+                        {
+                            titlesToSeed.Add("STAR WARS Zero CompanyT");
+                        }
+                        else if (fileBasename.Equals("gen1recomp", StringComparison.OrdinalIgnoreCase))
+                        {
+                            titlesToSeed.Add("C:");
+                        }
+
+                        // Check if containers already exist for any alias of this profile
+                        bool alreadyExists = titlesToSeed.Any(t =>
+                            settings.Containers.ContainsKey($"Profile_Game_{t}")
+                            || settings.Containers.ContainsKey($"Profile_Game_{t}_AC")
+                            || settings.Containers.ContainsKey($"Profile_Game_{t}_DC"));
+
+                        if (alreadyExists)
+                        {
+                            continue;
+                        }
+
+                        // Extract profile settings from XML
+                        double tdp = GetXmlDouble(doc, "TDP", 15.0);
+                        bool cpuBoost = GetXmlBool(doc, "CPUBoost", false);
+                        double cpuEpp = GetXmlDouble(doc, "CPUEPP", 80.0);
+                        bool autoTdp = GetXmlBool(doc, "AutoTDPEnabled", false);
+                        int targetFps = GetXmlInt(doc, "AutoTDPTargetFPS", 60);
+                        int minTdp = GetXmlInt(doc, "AutoTDPMinTDP", 8);
+                        int maxTdp = GetXmlInt(doc, "AutoTDPMaxTDP", 30);
+                        bool useMl = GetXmlBool(doc, "AutoTDPUseMLMode", true);
+                        int ctrlType = GetXmlInt(doc, "AutoTDPControllerType", 0);
+                        int perfMode = GetXmlInt(doc, "LegionPerformanceMode", 255);
+                        bool tdpBoost = GetXmlBool(doc, "TDPBoostEnabled", false);
+                        int boostSppt = GetXmlInt(doc, "TDPBoostSPPT", 1);
+                        int boostFppt = GetXmlInt(doc, "TDPBoostFPPT", 3);
+                        int fpsLimit = GetXmlInt(doc, "FPSLimit", 0);
+                        bool stickyTdp = GetXmlBool(doc, "StickyTDP", false);
+                        bool hdr = GetXmlBool(doc, "HDREnabled", false);
+
+                        // DC-specific values
+                        double tdpDc = GetXmlDouble(doc, "TDP_DC", tdp);
+                        bool cpuBoostDc = GetXmlBool(doc, "CPUBoost_DC", cpuBoost);
+                        double cpuEppDc = GetXmlDouble(doc, "CPUEPP_DC", cpuEpp);
+                        bool autoTdpDc = GetXmlBool(doc, "AutoTDPEnabled_DC", autoTdp);
+                        int targetFpsDc = GetXmlInt(doc, "AutoTDPTargetFPS_DC", targetFps);
+                        int fpsLimitDc = GetXmlInt(doc, "FPSLimit_DC", fpsLimit);
+
+                        long lastMod = File.GetLastWriteTimeUtc(xmlPath).Ticks;
+
+                        Action<ApplicationDataContainer, bool> populate = (cont, isDc) =>
+                        {
+                            cont.Values["TDP"] = (double)(isDc ? tdpDc : tdp);
+                            cont.Values["CPUBoost"] = (bool)(isDc ? cpuBoostDc : cpuBoost);
+                            cont.Values["CPUEPP"] = (double)(isDc ? cpuEppDc : cpuEpp);
+                            cont.Values["FluidMotionFrames"] = false;
+                            cont.Values["RadeonSuperResolution"] = false;
+                            cont.Values["RadeonSuperResolutionSharpness"] = (double)80;
+                            cont.Values["ImageSharpening"] = false;
+                            cont.Values["ImageSharpeningSharpness"] = (double)80;
+                            cont.Values["RadeonAntiLag"] = false;
+                            cont.Values["RadeonBoost"] = false;
+                            cont.Values["RadeonBoostResolution"] = (double)0;
+                            cont.Values["RadeonChill"] = false;
+                            cont.Values["RadeonChillMinFPS"] = (double)30;
+                            cont.Values["RadeonChillMaxFPS"] = (double)60;
+                            int effFps = isDc ? fpsLimitDc : fpsLimit;
+                            cont.Values["FPSLimitEnabled"] = (bool)(effFps > 0);
+                            cont.Values["FPSLimitValue"] = (int)(effFps > 0 ? effFps : 60);
+                            cont.Values["AutoTDPEnabled"] = (bool)(isDc ? autoTdpDc : autoTdp);
+                            cont.Values["AutoTDPTargetFPS"] = (int)(isDc ? targetFpsDc : targetFps);
+                            cont.Values["AutoTDPMinTDP"] = (int)minTdp;
+                            cont.Values["AutoTDPMaxTDP"] = (int)maxTdp;
+                            cont.Values["AutoTDPUseMLMode"] = (bool)useMl;
+                            cont.Values["AutoTDPControllerType"] = (int)ctrlType;
+                            cont.Values["OSPowerMode"] = (int)1;
+                            cont.Values["LegionPerformanceMode"] = (int)perfMode;
+                            cont.Values["TDPModeIndex"] = (int)-1;
+                            cont.Values["TDPBoostEnabled"] = (bool)tdpBoost;
+                            cont.Values["TDPBoostSPPT"] = (int)boostSppt;
+                            cont.Values["TDPBoostFPPT"] = (int)boostFppt;
+                            cont.Values["HDREnabled"] = (bool)hdr;
+                            cont.Values["Resolution"] = "";
+                            cont.Values["StickyTDPEnabled"] = (bool)stickyTdp;
+                            cont.Values["StickyTDPInterval"] = (int)5;
+                            cont.Values["OverlayLevel"] = (int)0;
+                            if (!string.IsNullOrEmpty(fullPath))
+                                cont.Values["GameExePath"] = fullPath;
+                            cont.Values["LastModifiedUtc"] = lastMod;
+                        };
+
+                        foreach (var tName in titlesToSeed)
+                        {
+                            var singleCont = settings.CreateContainer($"Profile_Game_{tName}", ApplicationDataCreateDisposition.Always);
+                            populate(singleCont, false);
+
+                            var acCont = settings.CreateContainer($"Profile_Game_{tName}_AC", ApplicationDataCreateDisposition.Always);
+                            populate(acCont, false);
+
+                            var dcCont = settings.CreateContainer($"Profile_Game_{tName}_DC", ApplicationDataCreateDisposition.Always);
+                            populate(dcCont, true);
+
+                            // Also restore controller profile if present in XML
+                            if (!settings.Containers.ContainsKey($"ControllerProfile_Game_{tName}"))
+                            {
+                                var ctrlCont = settings.CreateContainer($"ControllerProfile_Game_{tName}", ApplicationDataCreateDisposition.Always);
+                                string y1 = GetXmlVal(doc, "LegionButtonY1");
+                                if (!string.IsNullOrEmpty(y1)) ctrlCont.Values["ButtonY1"] = y1;
+                                string y2 = GetXmlVal(doc, "LegionButtonY2");
+                                if (!string.IsNullOrEmpty(y2)) ctrlCont.Values["ButtonY2"] = y2;
+                                string y3 = GetXmlVal(doc, "LegionButtonY3");
+                                if (!string.IsNullOrEmpty(y3)) ctrlCont.Values["ButtonY3"] = y3;
+                                string m1 = GetXmlVal(doc, "LegionButtonM1");
+                                if (!string.IsNullOrEmpty(m1)) ctrlCont.Values["ButtonM1"] = m1;
+                                string m2 = GetXmlVal(doc, "LegionButtonM2");
+                                if (!string.IsNullOrEmpty(m2)) ctrlCont.Values["ButtonM2"] = m2;
+                                string m3 = GetXmlVal(doc, "LegionButtonM3");
+                                if (!string.IsNullOrEmpty(m3)) ctrlCont.Values["ButtonM3"] = m3;
+                                string dt = GetXmlVal(doc, "LegionButtonDesktop");
+                                if (!string.IsNullOrEmpty(dt)) ctrlCont.Values["ButtonDesktop"] = dt;
+                                string pg = GetXmlVal(doc, "LegionButtonPage");
+                                if (!string.IsNullOrEmpty(pg)) ctrlCont.Values["ButtonPage"] = pg;
+                                string lb = GetXmlVal(doc, "LegionLightBrightness");
+                                if (!string.IsNullOrEmpty(lb) && double.TryParse(lb, out double pLb)) ctrlCont.Values["Brightness"] = pLb;
+                                if (!string.IsNullOrEmpty(fullPath)) ctrlCont.Values["GameExePath"] = fullPath;
+                            }
+                        }
+
+                        restoredCount++;
+                        Logger.Info($"SyncProfilesFromHelperXmls: Restored profile containers for '{title}' (from {Path.GetFileName(xmlPath)})");
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Warn($"SyncProfilesFromHelperXmls: Failed to import {Path.GetFileName(xmlPath)}: {ex.Message}");
+                    }
+                }
+
+                if (restoredCount > 0)
+                {
+                    Logger.Info($"SyncProfilesFromHelperXmls: Successfully restored {restoredCount} profile(s) from disk");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"SyncProfilesFromHelperXmls failed: {ex.Message}");
+            }
+        }
+
         private List<string> GetAllSavedGameProfiles()
         {
+            SyncProfilesFromHelperXmls();
+
             var gameNames = new HashSet<string>();
             var settings = ApplicationData.Current.LocalSettings;
 
@@ -103,10 +329,6 @@ namespace XboxGamingBar
                     }
 
                     gameNames.Add(gameName);
-                } else
-                {
-                    Logger.Info("Found no profile that starts with Profile_Game_");
-                    Logger.Info(containerName);
                 }
             }
 
@@ -453,7 +675,9 @@ namespace XboxGamingBar
                         var nameEl = doc.Descendants("Name").FirstOrDefault();
                         if (nameEl != null && !string.IsNullOrEmpty(nameEl.Value))
                         {
-                            map[nameEl.Value] = Path.GetFileNameWithoutExtension(xmlPath);
+                            string baseName = Path.GetFileNameWithoutExtension(xmlPath);
+                            map[nameEl.Value] = baseName;
+                            map[nameEl.Value.Trim()] = baseName;
                         }
                     }
                     catch (Exception ex)

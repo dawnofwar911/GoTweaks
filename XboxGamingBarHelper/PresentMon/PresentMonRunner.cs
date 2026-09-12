@@ -353,7 +353,7 @@ namespace XboxGamingBarHelper.PresentMon
                 int app = Interlocked.CompareExchange(ref _applicationRows, 0, 0);
                 int afmf = Interlocked.CompareExchange(ref _afmfRows, 0, 0);
                 int rep = Interlocked.CompareExchange(ref _repeatedRows, 0, 0);
-                Logger.Info($"PresentMonRunner: heartbeat lines={n} (+{delta} in 5s), App={app}, AFMF={afmf}, Repeated={rep}");
+                Logger.Debug($"PresentMonRunner: heartbeat lines={n} (+{delta} in 5s), App={app}, AFMF={afmf}, Repeated={rep}");
 
                 // Auto-recover from same-exe game restart. When the user closes
                 // Forza and reopens it, the widget's RunningGame property

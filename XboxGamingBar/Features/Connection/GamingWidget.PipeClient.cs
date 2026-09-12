@@ -3,6 +3,7 @@ using Microsoft.Gaming.XboxGameBar.Input;
 using Microsoft.UI.Xaml.Controls;
 using NLog;
 using Shared.Data;
+using Shared.IPC;
 using Shared.Utilities;
 using System;
 using System.Collections.Generic;
@@ -238,61 +239,17 @@ namespace XboxGamingBar
         }
 
         /// <summary>
-        /// Parses a pipe JSON message into a ValueSet.
+        /// Parses a pipe JSON message into a ValueSet using the robust linear tokenizer in PipeMessage.
         /// </summary>
         private Windows.Foundation.Collections.ValueSet ParsePipeMessageToValueSet(string json)
         {
             try
             {
-                var result = new Windows.Foundation.Collections.ValueSet();
-                json = json.Trim();
-                if (!json.StartsWith("{") || !json.EndsWith("}"))
+                if (string.IsNullOrWhiteSpace(json))
                     return null;
 
-                // Simple JSON parsing
-                var matches = System.Text.RegularExpressions.Regex.Matches(json,
-                    @"""(\w+)""\s*:\s*(""[^""\\]*(\\.[^""\\]*)*""|-?\d+\.?\d*|true|false|null|\{[^{}]*\}|\[[^\[\]]*\])");
-
-                foreach (System.Text.RegularExpressions.Match match in matches)
-                {
-                    var key = match.Groups[1].Value;
-                    var value = match.Groups[2].Value;
-
-                    if (value.StartsWith("\"") && value.EndsWith("\""))
-                    {
-                        result[key] = UnescapeJsonString(value.Substring(1, value.Length - 2));
-                    }
-                    else if (value == "true")
-                    {
-                        result[key] = true;
-                    }
-                    else if (value == "false")
-                    {
-                        result[key] = false;
-                    }
-                    else if (value == "null")
-                    {
-                        result[key] = null;
-                    }
-                    else if (value.StartsWith("{") || value.StartsWith("["))
-                    {
-                        result[key] = value;
-                    }
-                    else if (value.Contains("."))
-                    {
-                        if (double.TryParse(value, out var d))
-                            result[key] = d;
-                    }
-                    else
-                    {
-                        if (int.TryParse(value, out var i))
-                            result[key] = i;
-                        else if (long.TryParse(value, out var l))
-                            result[key] = l;
-                    }
-                }
-
-                return result;
+                var pipeMsg = PipeMessage.FromJson(json);
+                return pipeMsg.ToValueSet();
             }
             catch (Exception ex)
             {

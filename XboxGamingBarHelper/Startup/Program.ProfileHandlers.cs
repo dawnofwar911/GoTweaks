@@ -1,4 +1,4 @@
-﻿using NLog;
+using NLog;
 using Shared.Constants;
 using Shared.Data;
 using Shared.IPC;
@@ -854,6 +854,8 @@ namespace XboxGamingBarHelper
                 glo => glo.TDPBoostFPPT = performanceManager.TDPBoostFPPT.Value);
         }
 
+        private static string lastAppliedGamePath = null;
+
         private static void RunningGame_PropertyChanged(object sender, PropertyChangedEventArgs e)
         {
             // #66: drive PresentMon subprocess lifecycle from the same RunningGame signal.
@@ -872,6 +874,19 @@ namespace XboxGamingBarHelper
                 isApplyingProfile = true;
                 if (systemManager.RunningGame.Value.IsValid())
                 {
+                    string currentPath = systemManager.RunningGame.Value.GameId.Path;
+                    if (string.Equals(lastAppliedGamePath, currentPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Same game executable is already active - update Lossless Scaling if title changed, but do not reapply profile
+                        if (losslessScalingManager.LosslessScalingInstalled.Value)
+                        {
+                            var gameName = systemManager.RunningGame.Value.GameId.Name;
+                            losslessScalingManager.SetCurrentGame(gameName, currentPath);
+                        }
+                        return;
+                    }
+                    lastAppliedGamePath = currentPath;
+
                     bool gameHasActiveProfile = false;
                     if (profileManager.TryGetProfile(systemManager.RunningGame.Value.GameId, out var runningGameProfile))
                     {
@@ -952,6 +967,7 @@ namespace XboxGamingBarHelper
                 }
                 else
                 {
+                    lastAppliedGamePath = null;
                     Logger.Info($"Stopped playing game, use global profile instead.");
                     RestoreGlobalProfileSettings();
 
