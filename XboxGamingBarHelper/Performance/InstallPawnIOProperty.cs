@@ -63,13 +63,13 @@ namespace XboxGamingBarHelper.Performance
 
                 Logger.Info($"PawnIO installer downloaded to {tempPath}");
 
-                // Step 2: Run installer with silent install and UAC elevation
+                // Step 2: Run installer with silent install
                 var startInfo = new ProcessStartInfo
                 {
                     FileName = tempPath,
                     Arguments = "-install -silent",
-                    UseShellExecute = true,  // Required for Verb = "runas" to work
-                    Verb = "runas"           // This triggers the UAC prompt
+                    UseShellExecute = false,
+                    CreateNoWindow = true
                 };
 
                 Logger.Info("Launching PawnIO installer with -install -silent...");

@@ -64,8 +64,8 @@ namespace XboxGamingBarHelper.Settings
                 {
                     FileName = tempPath,
                     Arguments = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART",
-                    UseShellExecute = true,  // required for Verb = "runas"
-                    Verb = "runas"
+                    UseShellExecute = false,
+                    CreateNoWindow = true
                 };
 
                 Logger.Info("Launching usbip-win2 installer silently...");
@@ -73,7 +73,7 @@ namespace XboxGamingBarHelper.Settings
                 {
                     if (process == null)
                     {
-                        Logger.Warn("Failed to start usbip-win2 installer (UAC may have been cancelled)");
+                        Logger.Warn("Failed to start usbip-win2 installer");
                         return;
                     }
 

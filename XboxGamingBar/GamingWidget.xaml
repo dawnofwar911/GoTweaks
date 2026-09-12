@@ -6587,12 +6587,15 @@
                                       BorderBrush="{StaticResource SystemAccentBrush}"
                                       BorderThickness="2"
                                       Foreground="White"
+                                      ToolTipService.ToolTip="Manual hotkey toggle (Ctrl+Alt+S). When AutoScale is ON, games scale automatically on window focus."
                                       Style="{StaticResource StandaloneToggleButtonStyle}"/>
                         <TextBlock x:Name="LosslessScalingAutoScaleHintText"
-                                   Text="AutoScale is active in Lossless Scaling"
+                                   Text="AutoScale is active — game scales automatically on focus"
                                    FontSize="11"
                                    Foreground="#00C8FF"
                                    HorizontalAlignment="Center"
+                                   TextAlignment="Center"
+                                   TextWrapping="Wrap"
                                    Margin="0,4,0,0"
                                    Visibility="{Binding ElementName=LosslessScalingAutoScaleToggle, Path=IsOn, Converter={StaticResource BooleanToVisibilityConverter}}"/>
 

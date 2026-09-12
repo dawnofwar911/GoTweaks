@@ -738,14 +738,14 @@ namespace XboxGamingBarHelper.LosslessScaling
             // Key down for main key
             comboList.Add(new InjectedInputKeyboardInfo { VirtualKey = (ushort)mainKey, KeyOptions = InjectedInputKeyOptions.None });
 
+            // Key up for main key first
+            comboList.Add(new InjectedInputKeyboardInfo { VirtualKey = (ushort)mainKey, KeyOptions = InjectedInputKeyOptions.KeyUp });
+
             // Key up for modifiers (reverse order)
             for (int i = modifiers.Count - 1; i >= 0; i--)
             {
                 comboList.Add(new InjectedInputKeyboardInfo { VirtualKey = (ushort)modifiers[i], KeyOptions = InjectedInputKeyOptions.KeyUp });
             }
-
-            // Key up for main key
-            comboList.Add(new InjectedInputKeyboardInfo { VirtualKey = (ushort)mainKey, KeyOptions = InjectedInputKeyOptions.KeyUp });
 
             toggleScalingKeyboardCombo = comboList.ToArray();
             Logger.Info($"Lossless Scaling hotkey configured: {currentHotkeyDescription}");
@@ -985,7 +985,19 @@ namespace XboxGamingBarHelper.LosslessScaling
                     return settings;
                 }
 
-                settings.ScalingType = profile.Element("ScalingType")?.Value ?? "Off";
+                string rawScalingType = profile.Element("ScalingType")?.Value ?? "Off";
+                if (string.Equals(rawScalingType, "SharpBilinear", StringComparison.OrdinalIgnoreCase))
+                {
+                    settings.ScalingType = "Sharp Bilinear";
+                }
+                else if (string.Equals(rawScalingType, "NearestNeighbor", StringComparison.OrdinalIgnoreCase))
+                {
+                    settings.ScalingType = "Nearest Neighbor";
+                }
+                else
+                {
+                    settings.ScalingType = rawScalingType;
+                }
 
                 // Sharpness in Lossless Scaling is 0..10. If read > 10 (from old bug), normalize/clamp.
                 if (int.TryParse(profile.Element("Sharpness")?.Value, out int sharpness))
@@ -1035,7 +1047,15 @@ namespace XboxGamingBarHelper.LosslessScaling
                     settings.AspectRatio = fitMode;
                 }
 
-                settings.FrameGenType = profile.Element("FrameGeneration")?.Value ?? "Off";
+                string rawFrameGen = profile.Element("FrameGeneration")?.Value ?? "Off";
+                if (string.Equals(rawFrameGen, "LSFG", StringComparison.OrdinalIgnoreCase) || string.Equals(rawFrameGen, "LSFG1", StringComparison.OrdinalIgnoreCase))
+                {
+                    settings.FrameGenType = "LSFG1";
+                }
+                else
+                {
+                    settings.FrameGenType = rawFrameGen;
+                }
                 settings.LSFG3Mode = profile.Element("LSFG3Mode1")?.Value ?? "FIXED";
                 settings.LSFG3Multiplier = int.TryParse(profile.Element("LSFG3Multiplier")?.Value, out int mult) ? mult : 2;
                 settings.LSFG3Target = int.TryParse(profile.Element("LSFG3Target")?.Value, out int target) ? target : 120;
@@ -1087,7 +1107,16 @@ namespace XboxGamingBarHelper.LosslessScaling
                 }
 
                 // Update values from current properties
-                SetElementValue(profile, "ScalingType", losslessScalingScalingType.Value);
+                string scalingTypeToWrite = losslessScalingScalingType.Value;
+                if (string.Equals(scalingTypeToWrite, "Sharp Bilinear", StringComparison.OrdinalIgnoreCase))
+                {
+                    scalingTypeToWrite = "SharpBilinear";
+                }
+                else if (string.Equals(scalingTypeToWrite, "Nearest Neighbor", StringComparison.OrdinalIgnoreCase))
+                {
+                    scalingTypeToWrite = "NearestNeighbor";
+                }
+                SetElementValue(profile, "ScalingType", scalingTypeToWrite);
                 SetElementValue(profile, "Sharpness", Math.Max(0, Math.Min(10, losslessScalingSharpness.Value)).ToString());
 
                 // FSRType in LS: OPTIMIZED or DEFAULT

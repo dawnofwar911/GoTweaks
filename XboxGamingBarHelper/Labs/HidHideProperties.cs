@@ -91,9 +91,8 @@ namespace XboxGamingBarHelper.Labs
                 {
                     FileName = executable,
                     Arguments = arguments,
-                    UseShellExecute = true,
-                    Verb = "runas",
-                    WindowStyle = ProcessWindowStyle.Hidden,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
                 };
 
                 using Process process = Process.Start(startInfo);
@@ -105,10 +104,10 @@ namespace XboxGamingBarHelper.Labs
 
                 Logger.Info($"HidHide installer started ({executable}), PID={process.Id}");
 
-                if (!process.WaitForExit(300000))
+                if (!process.WaitForExit(180000))
                 {
                     try { process.Kill(); } catch { }
-                    Logger.Warn("HidHide installation timed out after 5 minutes");
+                    Logger.Warn("HidHide installation timed out after 3 minutes");
                     return false;
                 }
 
@@ -151,23 +150,22 @@ namespace XboxGamingBarHelper.Labs
                 {
                     FileName = tempPath,
                     Arguments = "/quiet /norestart",
-                    UseShellExecute = true,
-                    Verb = "runas",
-                    WindowStyle = ProcessWindowStyle.Hidden,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
                 };
 
                 using Process process = Process.Start(startInfo);
                 if (process == null)
                 {
-                    Logger.Warn("Failed to start downloaded HidHide installer (UAC may have been cancelled)");
+                    Logger.Warn("Failed to start downloaded HidHide installer");
                     return false;
                 }
 
                 Logger.Info($"HidHide direct installer started, PID={process.Id}");
-                if (!process.WaitForExit(300000))
+                if (!process.WaitForExit(120000))
                 {
                     try { process.Kill(); } catch { }
-                    Logger.Warn("HidHide direct installation timed out after 5 minutes");
+                    Logger.Warn("HidHide direct installation timed out after 2 minutes");
                     return false;
                 }
 
