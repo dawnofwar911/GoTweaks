@@ -4269,7 +4269,7 @@ namespace XboxGamingBarHelper.Labs
                 if (i > pre) preSb.Append(' ');
                 preSb.Append(buffer[i].ToString("X2"));
             }
-            Logger.Info($"GyroSpike[{sideTag}] base={baseOffset} gX={gX} gY={gY} gZ={gZ} | pre[{pre}..{baseOffset - 1}]={preSb} block[{baseOffset}..{end - 1}]={sb}");
+            Logger.Debug($"GyroSpike[{sideTag}] base={baseOffset} gX={gX} gY={gY} gZ={gZ} | pre[{pre}..{baseOffset - 1}]={preSb} block[{baseOffset}..{end - 1}]={sb}");
         }
 
         private static bool HasHighQualityImuSample(byte[] buffer, int baseOffset)

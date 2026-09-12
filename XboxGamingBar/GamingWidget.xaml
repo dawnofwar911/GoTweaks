@@ -5835,7 +5835,7 @@
                                         <TextBlock Foreground="#A0C0D0"
                                                    FontSize="11"
                                                    TextWrapping="Wrap">
-                                            Microsoft Default Game Profiles provide optimized TDP and FPS settings for specific games. When this is off, GoTweaks will not apply Default Game Profiles at all. It is on by default on devices with native profile support (Legion Go Z1/Z2 Extreme); on other AMD devices, turning it on uses Z1 Extreme (OMNI) profiles as a fallback.
+                                            Default Game Profiles automatically apply optimized TDP and FPS caps for supported games. When active, a profile card appears at the top of the Performance tab when launching a supported game. Custom per-game profiles take precedence over default profiles. Supported on Legion Go Z1/Z2 Extreme (with fallback to Z1 OMNI on other hardware).
                                         </TextBlock>
                                         <HyperlinkButton Content="Learn more about Game Profiles"
                                                          NavigateUri="https://developer.microsoft.com/en-us/games/articles/2025/11/introducing-game-profiles-for-asus-rog-xbox-ally-gaming-handhelds/"

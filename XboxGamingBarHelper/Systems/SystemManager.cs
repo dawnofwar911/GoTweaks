@@ -1037,11 +1037,11 @@ namespace XboxGamingBarHelper.Systems
                         var gameName = GetGameName(processWindow.Value.Path, processWindow.Value.Title);
                         if (useLastFocused && !processWindow.Value.IsForeground)
                         {
-                            Logger.Info($"GamesOnly OFF: Last focused app \"{processWindow.Value.Title}\" at path \"{processWindow.Value.Path}\" treated as game (no foreground window detected).");
+                            Logger.Debug($"GamesOnly OFF: Last focused app \"{processWindow.Value.Title}\" at path \"{processWindow.Value.Path}\" treated as game (no foreground window detected).");
                         }
                         else
                         {
-                            Logger.Info($"GamesOnly OFF: Foreground window \"{processWindow.Value.Title}\" at path \"{processWindow.Value.Path}\" treated as game.");
+                            Logger.Debug($"GamesOnly OFF: Foreground window \"{processWindow.Value.Title}\" at path \"{processWindow.Value.Path}\" treated as game.");
                         }
                         possibleGames.Add(new RunningGame(processWindow.Value.ProcessId, gameName, processWindow.Value.Path, 0, processWindow.Value.IsForeground || useLastFocused));
                         continue;

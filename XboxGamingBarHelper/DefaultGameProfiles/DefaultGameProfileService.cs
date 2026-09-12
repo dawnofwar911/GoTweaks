@@ -188,37 +188,37 @@ namespace XboxGamingBarHelper.DefaultGameProfiles
                 using (var uninstallKey = Registry.LocalMachine.OpenSubKey(
                     @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"))
                 {
-                    if (uninstallKey == null)
+                    if (uninstallKey != null)
                     {
-                        Logger.Debug("BuildSteamInstallCache: Uninstall registry key not found");
-                        return cache;
-                    }
-
-                    foreach (var subKeyName in uninstallKey.GetSubKeyNames())
-                    {
-                        // Steam apps have keys like "Steam App 1551360"
-                        if (!subKeyName.StartsWith("Steam App ", StringComparison.OrdinalIgnoreCase))
-                            continue;
-
-                        var appId = subKeyName.Substring(10); // Extract AppID after "Steam App "
-
-                        try
+                        foreach (var subKeyName in uninstallKey.GetSubKeyNames())
                         {
-                            using (var appKey = uninstallKey.OpenSubKey(subKeyName))
+                            // Steam apps have keys like "Steam App 1551360"
+                            if (!subKeyName.StartsWith("Steam App ", StringComparison.OrdinalIgnoreCase))
+                                continue;
+
+                            var appId = subKeyName.Substring(10); // Extract AppID after "Steam App "
+
+                            try
                             {
-                                var installLocation = appKey?.GetValue("InstallLocation") as string;
-                                if (!string.IsNullOrEmpty(installLocation))
+                                using (var appKey = uninstallKey.OpenSubKey(subKeyName))
                                 {
-                                    cache[installLocation] = appId;
+                                    var installLocation = appKey?.GetValue("InstallLocation") as string;
+                                    if (!string.IsNullOrEmpty(installLocation) && !cache.ContainsKey(installLocation))
+                                    {
+                                        cache[installLocation] = appId;
+                                    }
                                 }
                             }
-                        }
-                        catch (Exception ex)
-                        {
-                            Logger.Debug($"Failed to read Steam app {appId}: {ex.Message}");
+                            catch (Exception ex)
+                            {
+                                Logger.Debug($"Failed to read Steam app {appId}: {ex.Message}");
+                            }
                         }
                     }
                 }
+
+                // Also scan Steam library folders directly (catches games where registry InstallLocation is empty)
+                ScanSteamLibraries(cache);
             }
             catch (Exception ex)
             {
@@ -228,6 +228,101 @@ namespace XboxGamingBarHelper.DefaultGameProfiles
             sw.Stop();
             Logger.Debug($"BuildSteamInstallCache: Completed in {sw.ElapsedMilliseconds}ms with {cache.Count} games");
             return cache;
+        }
+
+        /// <summary>
+        /// Scans Steam libraryfolders.vdf and appmanifest files to ensure all installed Steam games are cached.
+        /// </summary>
+        private static void ScanSteamLibraries(Dictionary<string, string> cache)
+        {
+            try
+            {
+                string steamPath = null;
+                using (var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\WOW6432Node\Valve\Steam") ??
+                                 Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Valve\Steam"))
+                {
+                    steamPath = key?.GetValue("InstallPath") as string ?? key?.GetValue("SteamPath") as string;
+                }
+
+                if (string.IsNullOrEmpty(steamPath) || !Directory.Exists(steamPath))
+                {
+                    steamPath = @"C:\Program Files (x86)\Steam";
+                }
+
+                if (!Directory.Exists(steamPath)) return;
+
+                var libraryFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { steamPath };
+                var vdfPath = Path.Combine(steamPath, "steamapps", "libraryfolders.vdf");
+                if (File.Exists(vdfPath))
+                {
+                    foreach (var line in File.ReadAllLines(vdfPath))
+                    {
+                        var trimmed = line.Trim();
+                        if (trimmed.StartsWith("\"path\"", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var parts = trimmed.Split(new[] { '"' }, StringSplitOptions.RemoveEmptyEntries);
+                            if (parts.Length >= 2)
+                            {
+                                var libPath = parts[parts.Length - 1].Replace(@"\\", @"\");
+                                if (Directory.Exists(libPath))
+                                {
+                                    libraryFolders.Add(libPath);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                foreach (var lib in libraryFolders)
+                {
+                    var steamAppsDir = Path.Combine(lib, "steamapps");
+                    if (!Directory.Exists(steamAppsDir)) continue;
+
+                    var commonDir = Path.Combine(steamAppsDir, "common");
+
+                    foreach (var manifestFile in Directory.EnumerateFiles(steamAppsDir, "appmanifest_*.acf"))
+                    {
+                        try
+                        {
+                            var fileName = Path.GetFileNameWithoutExtension(manifestFile);
+                            if (fileName.Length <= 12) continue;
+                            var appId = fileName.Substring(12);
+
+                            string installDir = null;
+                            foreach (var line in File.ReadAllLines(manifestFile))
+                            {
+                                var trimmed = line.Trim();
+                                if (trimmed.StartsWith("\"installdir\"", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    var parts = trimmed.Split(new[] { '"' }, StringSplitOptions.RemoveEmptyEntries);
+                                    if (parts.Length >= 2)
+                                    {
+                                        installDir = parts[parts.Length - 1];
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (!string.IsNullOrEmpty(installDir))
+                            {
+                                var fullGameDir = Path.Combine(commonDir, installDir);
+                                if (!cache.ContainsKey(fullGameDir))
+                                {
+                                    cache[fullGameDir] = appId;
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Debug($"Failed to parse manifest {manifestFile}: {ex.Message}");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug($"Failed to scan Steam libraries: {ex.Message}");
+            }
         }
 
         /// <summary>

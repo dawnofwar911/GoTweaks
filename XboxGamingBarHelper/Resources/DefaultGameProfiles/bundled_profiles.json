@@ -1,4 +1,4 @@
-﻿{
+{
   "version": 1,
   "exportedAt": "2026-02-02T20:38:37.9784433Z",
   "exportedFrom": "DESKTOP-L7H3D95",
@@ -919,7 +919,7 @@
       ]
     },
     {
-      "gameName": "THPS 3\u002B4",
+      "gameName": "THPS 3+4",
       "identifiers": [
         {
           "platform": "MSIXVC",
@@ -1145,7 +1145,7 @@
       ]
     },
     {
-      "gameName": "Assassin\u0027s Creed Shadows",
+      "gameName": "Assassin's Creed Shadows",
       "identifiers": [
         {
           "platform": "MSIXVC",
@@ -1284,7 +1284,7 @@
       ]
     },
     {
-      "gameName": "Assassin\u0027s Creed Valhalla",
+      "gameName": "Assassin's Creed Valhalla",
       "identifiers": [
         {
           "platform": "MSIXVC",
@@ -1815,7 +1815,7 @@
       ]
     },
     {
-      "gameName": "Liar\u0027s Bar",
+      "gameName": "Liar's Bar",
       "identifiers": [
         {
           "platform": "Steam",
@@ -2939,7 +2939,7 @@
       ]
     },
     {
-      "gameName": "Sid Meier\u0027s CIV VII",
+      "gameName": "Sid Meier's CIV VII",
       "identifiers": [
         {
           "platform": "Steam",
@@ -3148,7 +3148,7 @@
       ]
     },
     {
-      "gameName": "Tom Clancy\u0027s Rainbow Six Siege X",
+      "gameName": "Tom Clancy's Rainbow Six Siege X",
       "identifiers": [
         {
           "platform": "MSIXVC",
@@ -3249,6 +3249,249 @@
           "frameCap": null,
           "resolutionCap": "Default",
           "controlMode": null
+        }
+      ]
+    },
+    {
+      "gameName": "Ghost of Tsushima DIRECTOR'S CUT",
+      "identifiers": [
+        {
+          "platform": "Steam",
+          "gameUid": "2215430"
+        }
+      ],
+      "profiles": [
+        {
+          "hardwareModel": "HORSEM4N",
+          "provider": "ArmouryCrate",
+          "tdp": 24,
+          "frameCap": 60,
+          "resolutionCap": null,
+          "controlMode": "Gamepad"
+        },
+        {
+          "hardwareModel": "OMNI",
+          "provider": "ArmouryCrate",
+          "tdp": 22,
+          "frameCap": 45,
+          "resolutionCap": null,
+          "controlMode": "Gamepad"
+        }
+      ]
+    },
+    {
+      "gameName": "Assassin's Creed Black Flag Resynced",
+      "identifiers": [
+        {
+          "platform": "Steam",
+          "gameUid": "3751950"
+        }
+      ],
+      "profiles": [
+        {
+          "hardwareModel": "HORSEM4N",
+          "provider": "ArmouryCrate",
+          "tdp": 18,
+          "frameCap": 60,
+          "resolutionCap": null,
+          "controlMode": "Gamepad"
+        },
+        {
+          "hardwareModel": "OMNI",
+          "provider": "ArmouryCrate",
+          "tdp": 15,
+          "frameCap": 60,
+          "resolutionCap": null,
+          "controlMode": "Gamepad"
+        }
+      ]
+    },
+    {
+      "gameName": "007 First Light",
+      "identifiers": [
+        {
+          "platform": "Steam",
+          "gameUid": "3768760"
+        }
+      ],
+      "profiles": [
+        {
+          "hardwareModel": "HORSEM4N",
+          "provider": "ArmouryCrate",
+          "tdp": 20,
+          "frameCap": 60,
+          "resolutionCap": null,
+          "controlMode": "Gamepad"
+        },
+        {
+          "hardwareModel": "OMNI",
+          "provider": "ArmouryCrate",
+          "tdp": 18,
+          "frameCap": 60,
+          "resolutionCap": null,
+          "controlMode": "Gamepad"
+        }
+      ]
+    },
+    {
+      "gameName": "Overcooked! All You Can Eat",
+      "identifiers": [
+        {
+          "platform": "Steam",
+          "gameUid": "1243830"
+        }
+      ],
+      "profiles": [
+        {
+          "hardwareModel": "HORSEM4N",
+          "provider": "ArmouryCrate",
+          "tdp": 10,
+          "frameCap": 60,
+          "resolutionCap": null,
+          "controlMode": "Gamepad"
+        },
+        {
+          "hardwareModel": "OMNI",
+          "provider": "ArmouryCrate",
+          "tdp": 10,
+          "frameCap": 60,
+          "resolutionCap": null,
+          "controlMode": "Gamepad"
+        }
+      ]
+    },
+    {
+      "gameName": "STAR WARS Zero Company",
+      "identifiers": [
+        {
+          "platform": "Steam",
+          "gameUid": "2075800"
+        }
+      ],
+      "profiles": [
+        {
+          "hardwareModel": "HORSEM4N",
+          "provider": "ArmouryCrate",
+          "tdp": 18,
+          "frameCap": 60,
+          "resolutionCap": null,
+          "controlMode": "Gamepad"
+        },
+        {
+          "hardwareModel": "OMNI",
+          "provider": "ArmouryCrate",
+          "tdp": 16,
+          "frameCap": 60,
+          "resolutionCap": null,
+          "controlMode": "Gamepad"
+        }
+      ]
+    },
+    {
+      "gameName": "Minecraft",
+      "identifiers": [
+        {
+          "platform": "MSIXVC",
+          "gameUid": "Microsoft.MinecraftUWP_8wekyb3d8bbwe"
+        }
+      ],
+      "profiles": [
+        {
+          "hardwareModel": "HORSEM4N",
+          "provider": "ArmouryCrate",
+          "tdp": 12,
+          "frameCap": 60,
+          "resolutionCap": null,
+          "controlMode": "Gamepad"
+        },
+        {
+          "hardwareModel": "OMNI",
+          "provider": "ArmouryCrate",
+          "tdp": 12,
+          "frameCap": 60,
+          "resolutionCap": null,
+          "controlMode": "Gamepad"
+        }
+      ]
+    },
+    {
+      "gameName": "Valheim",
+      "identifiers": [
+        {
+          "platform": "Steam",
+          "gameUid": "892970"
+        }
+      ],
+      "profiles": [
+        {
+          "hardwareModel": "HORSEM4N",
+          "provider": "ArmouryCrate",
+          "tdp": 18,
+          "frameCap": 45,
+          "resolutionCap": null,
+          "controlMode": "Gamepad"
+        },
+        {
+          "hardwareModel": "OMNI",
+          "provider": "ArmouryCrate",
+          "tdp": 18,
+          "frameCap": 40,
+          "resolutionCap": null,
+          "controlMode": "Gamepad"
+        }
+      ]
+    },
+    {
+      "gameName": "V Rising",
+      "identifiers": [
+        {
+          "platform": "Steam",
+          "gameUid": "1604030"
+        }
+      ],
+      "profiles": [
+        {
+          "hardwareModel": "HORSEM4N",
+          "provider": "ArmouryCrate",
+          "tdp": 20,
+          "frameCap": 60,
+          "resolutionCap": null,
+          "controlMode": "Gamepad"
+        },
+        {
+          "hardwareModel": "OMNI",
+          "provider": "ArmouryCrate",
+          "tdp": 18,
+          "frameCap": 50,
+          "resolutionCap": null,
+          "controlMode": "Gamepad"
+        }
+      ]
+    },
+    {
+      "gameName": "Subnautica 2",
+      "identifiers": [
+        {
+          "platform": "MSIXVC",
+          "gameUid": "UnknownWorldsEntertainmen.Subnautica2_8wekyb3d8bbwe"
+        }
+      ],
+      "profiles": [
+        {
+          "hardwareModel": "HORSEM4N",
+          "provider": "ArmouryCrate",
+          "tdp": 20,
+          "frameCap": 60,
+          "resolutionCap": null,
+          "controlMode": "Gamepad"
+        },
+        {
+          "hardwareModel": "OMNI",
+          "provider": "ArmouryCrate",
+          "tdp": 18,
+          "frameCap": 50,
+          "resolutionCap": null,
+          "controlMode": "Gamepad"
         }
       ]
     }
