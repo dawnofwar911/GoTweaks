@@ -1,4 +1,4 @@
-﻿using Microsoft.Win32;
+using Microsoft.Win32;
 using Nefarius.Drivers.HidHide;
 using Nefarius.Utilities.DeviceManagement.Extensions;
 using Nefarius.Utilities.DeviceManagement.PnP;
@@ -165,6 +165,41 @@ namespace XboxGamingBarHelper.ControllerEmulation
             catch (Exception ex)
             {
                 Logger.Warn($"HidHide proactive app registration at startup failed: {ex.Message}");
+            }
+
+            try
+            {
+                EnablePhysicalXInputDevnodes();
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Failed to enable physical XInput devnodes at startup: {ex.Message}");
+            }
+        }
+
+        public void EnablePhysicalXInputDevnodes()
+        {
+            try
+            {
+                var targets = QueryUsbDeviceIds(0x17EF, 0x6182, 0x6183, 0x6184, 0x6185, 0x61EB, 0x61EC, 0x61ED, 0x61EE)
+                    .Concat(QueryUsbDeviceIds(0x1A86, 0xE310, 0xE311))
+                    .Where(id => id.IndexOf("&MI_00", StringComparison.OrdinalIgnoreCase) >= 0)
+                    .ToList();
+
+                if (!targets.Any(t => t.IndexOf("61EB&MI_00", StringComparison.OrdinalIgnoreCase) >= 0))
+                {
+                    targets.Add("USB\\VID_17EF&PID_61EB&MI_00\\7&194b9d2e&1&0000");
+                }
+
+                foreach (string id in targets)
+                {
+                    bool launched = RunPnpUtil($"/enable-device \"{id}\"", out int exitCode, out string stdErr);
+                    Logger.Info($"SuppressionManager: pnputil /enable-device '{id}' launched={launched}, exit={exitCode}, err='{stdErr}'");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"SuppressionManager: EnablePhysicalXInputDevnodes threw: {ex.Message}");
             }
         }
 
@@ -424,6 +459,7 @@ namespace XboxGamingBarHelper.ControllerEmulation
             lock (syncRoot)
             {
                 Logger.Info("HidHide suppression disable requested");
+                EnablePhysicalXInputDevnodes();
 
                 if (TryDisableWithApi())
                 {
