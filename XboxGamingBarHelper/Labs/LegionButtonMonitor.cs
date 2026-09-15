@@ -4657,7 +4657,7 @@ namespace XboxGamingBarHelper.Labs
 
         /// <summary>
         /// When Steam or a Steam game is active, emit the appropriate Steam shortcut (Shift+Tab for
-        /// in-game overlay, Ctrl+1 for Steam Big Picture menu) and suppress the raw virtual Xbox Guide
+        /// in-game overlay, Ctrl+Alt+1 for Steam Big Picture menu) and suppress the raw virtual Xbox Guide
         /// pulse. This prevents Windows from intercepting the Guide button and opening the Xbox Game Bar
         /// on top of Steam. Returns true if handled.
         /// </summary>
@@ -4705,8 +4705,8 @@ namespace XboxGamingBarHelper.Labs
 
                             if (procName == "steam" || procName == "steamwebhelper")
                             {
-                                Logger.Info("LegionButtonMonitor: Steam UI foreground — firing Ctrl+1 Steam Menu shortcut");
-                                Program.SendKeyboardShortcut("Ctrl+1");
+                                Logger.Info("LegionButtonMonitor: Steam UI foreground — firing Ctrl+Alt+1 Steam Menu shortcut");
+                                Program.SendKeyboardShortcut("Ctrl+Alt+1");
                                 return true;
                             }
                         }
