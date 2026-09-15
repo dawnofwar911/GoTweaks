@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Threading;
 using NLog;
 using Shared.Data;
@@ -383,6 +383,7 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
 
         private void FlushNS2ProRumbleToXInput()
         {
+            if (physicalIndex >= 4) return;
             try
             {
                 byte large = ns2proMotorLeft;
@@ -414,6 +415,7 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
         /// </summary>
         private void FlushSteamDeckRumbleToXInput()
         {
+            if (physicalIndex >= 4) return;
             try
             {
                 byte large = steamDeckMotorLeft;
@@ -731,45 +733,44 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
                     return;
             }
 
-            // Always forward rumble to the physical XInput controller. The user's pad is
-            // almost always XInput-visible (Legion Go controllers expose XInput alongside
-            // their native HID), so rumble should reach the hardware regardless of which
-            // input source we're READING gamepad state from. Previously this was gated on
-            // inputSource == XInput, which meant Legion-HID users got no rumble at all.
-            try
+            // Always forward rumble to the physical XInput controller if connected.
+            if (physicalIndex < 4)
             {
-                // Apply user-configurable swap and intensity multiplier. Swap first so
-                // intensity scales whichever motor ends up on each side.
-                byte large = rumbleLarge;
-                byte small = rumbleSmall;
-                if (swapRumbleMotors)
+                try
                 {
-                    byte tmp = large; large = small; small = tmp;
+                    // Apply user-configurable swap and intensity multiplier. Swap first so
+                    // intensity scales whichever motor ends up on each side.
+                    byte large = rumbleLarge;
+                    byte small = rumbleSmall;
+                    if (swapRumbleMotors)
+                    {
+                        byte tmp = large; large = small; small = tmp;
+                    }
+                    int scaled = rumbleIntensityScaled; // snapshot to avoid volatile read race
+                    int leftSpeed = (large * 257 * scaled) / 1000;
+                    int rightSpeed = (small * 257 * scaled) / 1000;
+                    if (leftSpeed > 65535) leftSpeed = 65535;
+                    if (rightSpeed > 65535) rightSpeed = 65535;
+                    var vib = new ViiperXInputVibration
+                    {
+                        LeftMotorSpeed = (ushort)leftSpeed,
+                        RightMotorSpeed = (ushort)rightSpeed,
+                    };
+                    uint rc = ViiperXInput.SetState(physicalIndex, ref vib);
+                    if (rc == ViiperXInput.ErrorSuccess)
+                    {
+                        System.Threading.Interlocked.Increment(ref statsRumbleForwardedOk);
+                    }
+                    else
+                    {
+                        System.Threading.Interlocked.Increment(ref statsRumbleForwardedErr);
+                    }
                 }
-                int scaled = rumbleIntensityScaled; // snapshot to avoid volatile read race
-                int leftSpeed = (large * 257 * scaled) / 1000;
-                int rightSpeed = (small * 257 * scaled) / 1000;
-                if (leftSpeed > 65535) leftSpeed = 65535;
-                if (rightSpeed > 65535) rightSpeed = 65535;
-                var vib = new ViiperXInputVibration
-                {
-                    LeftMotorSpeed = (ushort)leftSpeed,
-                    RightMotorSpeed = (ushort)rightSpeed,
-                };
-                uint rc = ViiperXInput.SetState(physicalIndex, ref vib);
-                if (rc == ViiperXInput.ErrorSuccess)
-                {
-                    System.Threading.Interlocked.Increment(ref statsRumbleForwardedOk);
-                }
-                else
+                catch (Exception ex)
                 {
                     System.Threading.Interlocked.Increment(ref statsRumbleForwardedErr);
+                    Logger.Debug($"XInput SetState rumble failed: {ex.Message}");
                 }
-            }
-            catch (Exception ex)
-            {
-                System.Threading.Interlocked.Increment(ref statsRumbleForwardedErr);
-                Logger.Debug($"XInput SetState rumble failed: {ex.Message}");
             }
 
             // LED color forwarding — the emulated device's RGB lightbar is pushed to the
@@ -812,14 +813,8 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
         /// <summary>Discover which XInput index (0-3) has a connected physical controller.</summary>
         public static uint DetectPhysicalXInputIndex()
         {
-            // Log every slot's state, not just the first hit. When a user reports
-            // "no input after toggle" or "rumble silent" we need to know whether
-            // (a) the helper's XInput sees the physical Legion at all (HidHide
-            //     allowlist working), and
-            // (b) the picked slot is the physical or VIIPER's virtual device.
-            // Without this, debug requires an OS-level XInput probe outside the app.
             var state = new ViiperXInputState();
-            uint pick = 0;
+            uint pick = uint.MaxValue;
             bool picked = false;
             var connected = new System.Collections.Generic.List<uint>();
             for (uint i = 0; i < 4; i++)
@@ -827,12 +822,23 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
                 if (ViiperXInput.GetState(i, ref state) == ViiperXInput.ErrorSuccess)
                 {
                     connected.Add(i);
-                    if (!picked) { pick = i; picked = true; }
+                    var caps = new ViiperXInputCapabilitiesEx();
+                    uint rc = ViiperXInput.GetCapabilitiesEx(1, i, 1, ref caps);
+                    if (rc == ViiperXInput.ErrorSuccess)
+                    {
+                        // Match physical handheld controllers (Legion Go VID: 0x17EF, WinCHIPhead VID: 0x1A86).
+                        // Specifically exclude Microsoft VID (0x045E) which is the VIIPER virtual controller.
+                        if (!picked && (caps.VendorId == 0x17EF || caps.VendorId == 0x1A86))
+                        {
+                            pick = i;
+                            picked = true;
+                        }
+                    }
                 }
             }
             string slots = connected.Count == 0 ? "(none)" : string.Join(",", connected);
-            Logger.Info($"DetectPhysicalXInputIndex: connectedSlots=[{slots}], picked={(picked ? pick.ToString() : "0 (default — none connected)")}");
-            return picked ? pick : 0u;
+            Logger.Info($"DetectPhysicalXInputIndex: connectedSlots=[{slots}], picked={(picked ? pick.ToString() : "none (physical not connected to XInput)")}");
+            return picked ? pick : uint.MaxValue;
         }
 
         public void Start(uint inPhysicalIndex, uint inBusId, uint inDeviceId, string inTargetType)
@@ -956,12 +962,15 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
         public void ClearInputState()
         {
             labsGuideHeld = false; // drop any held Guide latch
-            try
+            if (physicalIndex < 4)
             {
-                var zero = new ViiperXInputVibration();
-                ViiperXInput.SetState(physicalIndex, ref zero);
+                try
+                {
+                    var zero = new ViiperXInputVibration();
+                    ViiperXInput.SetState(physicalIndex, ref zero);
+                }
+                catch { }
             }
-            catch { }
             if (running && !systemSuspended)
             {
                 try
@@ -1607,12 +1616,15 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
             stickGyro.Shutdown();
 
             // Clear any lingering rumble on the physical controller.
-            try
+            if (physicalIndex < 4)
             {
-                var zero = new ViiperXInputVibration();
-                ViiperXInput.SetState(physicalIndex, ref zero);
+                try
+                {
+                    var zero = new ViiperXInputVibration();
+                    ViiperXInput.SetState(physicalIndex, ref zero);
+                }
+                catch { }
             }
-            catch { }
 
             Logger.Info("VIIPER forwarder stopped");
         }
@@ -1873,6 +1885,11 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
                     }
                     else // XInput
                     {
+                        if (physicalIndex >= 4)
+                        {
+                            Thread.Sleep(16);
+                            continue;
+                        }
                         var rc = ViiperXInput.GetState(physicalIndex, ref xiState);
                         if (rc != ViiperXInput.ErrorSuccess)
                         {

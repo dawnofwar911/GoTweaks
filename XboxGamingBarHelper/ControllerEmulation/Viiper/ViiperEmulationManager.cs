@@ -18,7 +18,7 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
         private new static readonly Logger Logger = LogManager.GetCurrentClassLogger();
 
         private const uint DefaultBusId = 1;
-        private const string DefaultDeviceType = "xbox360";
+        private const string DefaultDeviceType = "dualsenseedge";
 
         private readonly SettingsManager settingsManager;
         private readonly ControllerEmulationManager legacyManager;
@@ -1104,10 +1104,7 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
             // smooth Game Bar controller navigation and access to back paddles & gyro.
             if (legionManager?.LegionGoDetected?.Value == true)
             {
-                if (string.IsNullOrEmpty(value) || !string.Equals(value, "XInput", StringComparison.OrdinalIgnoreCase))
-                {
-                    return ViiperInputSourceKind.LegionHid;
-                }
+                return ViiperInputSourceKind.LegionHid;
             }
 
             if (string.Equals(value, "LegionHid", StringComparison.OrdinalIgnoreCase))
