@@ -1,4 +1,4 @@
-﻿using Microsoft.Gaming.XboxGameBar;
+using Microsoft.Gaming.XboxGameBar;
 using Microsoft.Gaming.XboxGameBar.Input;
 using Microsoft.UI.Xaml.Controls;
 using NLog;
@@ -234,6 +234,10 @@ namespace XboxGamingBar
                     case "Game":
                         GameScrollViewer.Visibility = Visibility.Visible;
                         GameScrollViewer.ChangeView(null, 0, null, true);
+                        if (_profilesTabNeedsRefresh)
+                        {
+                            UpdateAllGameProfilesDisplay();
+                        }
                         break;
                     case "AMD":
                         AMDScrollViewer.Visibility = Visibility.Visible;

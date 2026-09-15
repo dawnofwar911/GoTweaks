@@ -1,4 +1,4 @@
-﻿using NLog;
+using NLog;
 using Shared.Constants;
 using Shared.Data;
 using Shared.IPC;
@@ -810,6 +810,10 @@ namespace XboxGamingBarHelper
                     };
                     LegionButtonMonitor.GamepadModeRawUpdated = (mode) =>
                     {
+                        // When controllers are detached, the wireless receiver hardware always reports D-Input.
+                        // Do not allow this to overwrite the user's preferred gamepad mode setting when detached!
+                        if (legionManager?.AnyControllerDetached == true) return;
+
                         var prop = legionManager?.LegionGamepadModeSelect;
                         if (prop == null) return;
                         prop.SuppressHardwareApply = true;
@@ -841,6 +845,22 @@ namespace XboxGamingBarHelper
                 }
 
                 return legionButtonMonitor;
+            }
+        }
+
+        /// <summary>
+        /// Called when controller dock state or wireless receiver connection changes.
+        /// Re-runs VIIPER's mode reconciliation so detached controllers get seamless XInput forwarding.
+        /// </summary>
+        internal static void NotifyDockStateChanged()
+        {
+            try
+            {
+                viiperEmulationManager?.OnDockStateChanged();
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Labs: viiperEmulationManager.OnDockStateChanged threw: {ex.Message}");
             }
         }
 

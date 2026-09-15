@@ -1,10 +1,11 @@
-﻿using NLog;
+using NLog;
 using Shared.Data;
 using Shared.Enums;
 using System;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
 using XboxGamingBarHelper.Core;
+using XboxGamingBarHelper.Settings;
 
 namespace XboxGamingBarHelper.Devices.Libraries.Legion
 {
@@ -1605,19 +1606,56 @@ namespace XboxGamingBarHelper.Devices.Libraries.Legion
     internal class LegionGamepadModeSelectProperty : HelperProperty<int, LegionManager>
     {
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
+        private const string SettingKey = "LegionGamepadPreferredMode";
         internal bool SuppressHardwareApply { get; set; }
 
-        public LegionGamepadModeSelectProperty(int initialValue, LegionManager inManager) : base(initialValue, null, Function.LegionGamepadModeSelect, inManager)
+        public static int GetPreferredMode()
+        {
+            try
+            {
+                if (LocalSettingsHelper.TryGetValue<int>(SettingKey, out int mode))
+                {
+                    return (mode == 1 || mode == 2) ? mode : 1;
+                }
+            }
+            catch { }
+            return 1;
+        }
+
+        public LegionGamepadModeSelectProperty(int initialValue, LegionManager inManager) : base(initialValue > 0 ? initialValue : GetPreferredMode(), null, Function.LegionGamepadModeSelect, inManager)
         {
         }
 
-        protected override void NotifyPropertyChanged(string propertyName = "")
+        protected override void NotifyPropertyChanged(string propertyName = null)
         {
             base.NotifyPropertyChanged(propertyName);
-            if (!SuppressHardwareApply && (Value == 1 || Value == 2))
+            if (Value == 1 || Value == 2)
             {
-                bool ok = Labs.LegionButtonMonitor.Current?.ApplyGamepadMode(Value) ?? false;
-                Logger.Info($"LegionGamepadModeSelect apply {(Value == 1 ? "xinput" : "dinput")} => {ok}");
+                if (!SuppressHardwareApply)
+                {
+                    try
+                    {
+                        LocalSettingsHelper.SetValue(SettingKey, Value);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Warn($"Failed to persist preferred gamepad mode: {ex.Message}");
+                    }
+
+                    if (Manager?.AnyControllerDetached != true)
+                    {
+                        bool ok = Labs.LegionButtonMonitor.Current?.ApplyGamepadMode(Value) ?? false;
+                        Logger.Info($"LegionGamepadModeSelect apply {(Value == 1 ? "xinput" : "dinput")} => {ok}");
+                    }
+                    else
+                    {
+                        Logger.Info($"LegionGamepadModeSelect updated while detached: preferred mode -> {(Value == 1 ? "xinput (bridged)" : "dinput")}");
+                        int display = Value == 1 ? 1 : 2;
+                        Manager?.LegionControllerInputMode?.SetValueAndSync(display);
+                    }
+                }
+
+                Program.NotifyDockStateChanged();
             }
         }
 

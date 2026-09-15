@@ -1,4 +1,4 @@
-﻿using Microsoft.Gaming.XboxGameBar;
+using Microsoft.Gaming.XboxGameBar;
 using Microsoft.Gaming.XboxGameBar.Input;
 using Microsoft.UI.Xaml.Controls;
 using NLog;
@@ -975,11 +975,13 @@ namespace XboxGamingBar
             }
 
             // Save to profile if FPS Limit saving is enabled
-            // Don't save during DGP restoration - values being restored to original state
-            if (SaveFPSLimit && !isLoadingProfile && !isSwitchingProfile && !isRestoringFromDefaultProfile)
+            // Don't save during DGP restoration or application
+            if (SaveFPSLimit && !isLoadingProfile && !isSwitchingProfile && !isRestoringFromDefaultProfile && !isApplyingDefaultProfile)
             {
                 SaveCurrentSettingsToProfile(currentProfileName);
             }
+
+            UpdateDefaultProfileStatus();
         }
 
         /// <summary>
@@ -1081,6 +1083,8 @@ namespace XboxGamingBar
                 FPSLimitValue.Text = $"{(int)e.NewValue} FPS";
             }
 
+            UpdateDefaultProfileStatus();
+
             if (fpsLimit == null || isApplyingHelperUpdate) return;
 
             if (FPSLimitToggle.IsOn)
@@ -1115,10 +1119,12 @@ namespace XboxGamingBar
                 Logger.Info($"FPS Limit changed (debounced): {fpsLimitPendingValue}");
 
                 // Save to profile if FPS Limit saving is enabled
-                if (SaveFPSLimit && !isLoadingProfile && !isSwitchingProfile)
+                if (SaveFPSLimit && !isLoadingProfile && !isSwitchingProfile && !isRestoringFromDefaultProfile && !isApplyingDefaultProfile)
                 {
                     SaveCurrentSettingsToProfile(currentProfileName);
                 }
+
+                UpdateDefaultProfileStatus();
             }
         }
 

@@ -1,4 +1,4 @@
-﻿using Microsoft.Gaming.XboxGameBar;
+using Microsoft.Gaming.XboxGameBar;
 using Microsoft.Gaming.XboxGameBar.Input;
 using Microsoft.UI.Xaml.Controls;
 using NLog;
@@ -67,6 +67,11 @@ namespace XboxGamingBar
             // Performance tab - Default Game Profile card
             DefaultProfileToggle.GotFocus += Control_GotFocus;
             DefaultProfileToggle.LostFocus += Control_LostFocus;
+            if (DefaultProfileResetButton != null)
+            {
+                DefaultProfileResetButton.GotFocus += Control_GotFocus;
+                DefaultProfileResetButton.LostFocus += Control_LostFocus;
+            }
 
             // Performance tab - Performance Overlay card
             PerformanceOverlayComboBox.GotFocus += Control_GotFocus;

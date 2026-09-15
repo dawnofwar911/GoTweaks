@@ -339,11 +339,24 @@ namespace XboxGamingBar
         // Without this guard, the SelectionChanged handler would keep re-running on
         // each restoration attempt, causing redundant re-renders.
         private bool _profileSortModeRestored;
+        private bool _profilesTabNeedsRefresh = true;
 
         private void UpdateAllGameProfilesDisplay()
         {
             if (AllGameProfilesContainer == null)
                 return;
+
+            // PERFORMANCE OPTIMIZATION:
+            // Only rebuild the entire profile cards list if the Game tab is currently visible.
+            // When user is on Performance, Quick, or Settings tab, defer this expensive
+            // disk I/O and visual tree reconstruction until they switch to the Game tab.
+            if (GameScrollViewer == null || GameScrollViewer.Visibility != Visibility.Visible)
+            {
+                _profilesTabNeedsRefresh = true;
+                Logger.Debug("UpdateAllGameProfilesDisplay deferred - Game tab is not visible");
+                return;
+            }
+            _profilesTabNeedsRefresh = false;
 
             // Restore the persisted sort mode on the first render. The XAML default is
             // "name"; on subsequent app starts we honor whatever the user picked last.

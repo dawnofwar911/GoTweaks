@@ -10,7 +10,7 @@ namespace XboxGamingBarHelper.Settings
     /// </summary>
     internal class ViiperInputSourceProperty : HelperProperty<string, SettingsManager>
     {
-        public const string Default = "XInput";
+        public const string Default = "LegionHid";
         private const string SettingsKey = "ViiperInputSource";
 
         public ViiperInputSourceProperty(SettingsManager inManager)

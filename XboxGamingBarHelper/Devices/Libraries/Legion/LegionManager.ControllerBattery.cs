@@ -1,4 +1,4 @@
-﻿using NLog;
+using NLog;
 using Shared.Data;
 using Shared.Enums;
 using System;
@@ -404,7 +404,23 @@ namespace XboxGamingBarHelper.Devices.Libraries.Legion
         /// details) but not docked (port cycle would kill it). A half that is fully off
         /// is neither, and conservatively counts as detached here.
         /// </summary>
-        public bool AnyControllerDetached => !leftControllerDocked || !rightControllerDocked;
+        public bool AnyControllerDetached
+        {
+            get
+            {
+                if (!leftControllerDocked || !rightControllerDocked) return true;
+                string vp = ControllerVidPid?.Value;
+                if (!string.IsNullOrEmpty(vp))
+                {
+                    if (vp.IndexOf("61ED", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        vp.IndexOf("61EC", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        }
 
         private bool leftControllerDocked = true;
         private bool rightControllerDocked = true;
@@ -489,6 +505,8 @@ namespace XboxGamingBarHelper.Devices.Libraries.Legion
                     {
                         Logger.Warn($"Failed to sync dock state from button monitor: {ex.Message}");
                     }
+
+                    Program.NotifyDockStateChanged();
                 }
 
                 if (connectionChanged)
@@ -541,6 +559,7 @@ namespace XboxGamingBarHelper.Devices.Libraries.Legion
                     if (changed || wasEmpty)
                     {
                         Logger.Info($"Controller VID:PID set to {vidPid}");
+                        Program.NotifyDockStateChanged();
                     }
 
                     // Always try to sync (the property will handle deduplication)

@@ -1,4 +1,4 @@
-﻿using NLog;
+using NLog;
 using Shared.Enums;
 using System;
 using System.Collections.Generic;
@@ -149,6 +149,10 @@ namespace Shared.Data
                             if (message.TryGetValue(nameof(UpdatedTime), out object timeObj))
                             {
                                 updatedTime = Convert.ToInt64(timeObj);
+                            }
+                            if (updatedTime <= 0 || updatedTime < property.UpdatedTime)
+                            {
+                                updatedTime = DateTime.Now.Ticks;
                             }
                             property.SetValue(content, updatedTime);
                         }

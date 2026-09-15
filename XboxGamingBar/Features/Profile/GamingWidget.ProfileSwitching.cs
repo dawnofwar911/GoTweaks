@@ -168,18 +168,38 @@ namespace XboxGamingBar
                 return;
             }
 
-            // Don't save when Default Game Profile is active - prevents overwriting user's profile
-            if (defaultGameProfileEnabled?.Value == true)
+            // Don't save during DGP application or restoration - handlers would save transient values
+            if (isApplyingDefaultProfile || isRestoringFromDefaultProfile)
             {
-                Logger.Debug($"Skipping profile save for {profileName} - Default Game Profile is active");
+                Logger.Debug($"Skipping profile save for {profileName} - DGP applying or restoring");
                 return;
             }
 
-            // Don't save during DGP restoration - toggle handlers would save wrong values during state restore
-            if (isRestoringFromDefaultProfile)
+            // Option A: When Default Game Profile is active, user fine-tuning adjustments are saved
+            // specifically to the per-game profile (Game_<gameName>), keeping Global untouched!
+            if (defaultGameProfileEnabled?.Value == true)
             {
-                Logger.Debug($"Skipping profile save for {profileName} - restoring from Default Game Profile");
-                return;
+                if (HasValidGame(currentGameName))
+                {
+                    LoadOrCreateGameProfiles();
+                    bool perGamePowerSourceSplit = GetPerGamePowerSourceProfileEnabled(currentGameName);
+                    if (perGamePowerSourceSplit)
+                    {
+                        var powerSupplyStatus = PowerManager.PowerSupplyStatus;
+                        bool isOnAC = powerSupplyStatus != PowerSupplyStatus.NotPresent;
+                        profileName = isOnAC ? $"Game_{currentGameName}_AC" : $"Game_{currentGameName}_DC";
+                    }
+                    else
+                    {
+                        profileName = $"Game_{currentGameName}";
+                    }
+                    Logger.Info($"Default Game Profile active: fine-tuning adjustments redirecting save to '{profileName}'");
+                }
+                else
+                {
+                    Logger.Debug($"Default Game Profile active with no valid game detected - skipping save to protect Global profile");
+                    return;
+                }
             }
 
             // Never save to "No game detected" profile (case-insensitive check)

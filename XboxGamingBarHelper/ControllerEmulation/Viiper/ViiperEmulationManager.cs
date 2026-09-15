@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using NLog;
 using Shared.Data;
 using XboxGamingBarHelper.Core;
@@ -53,6 +53,7 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
         private readonly byte[] guideOnlyBuffer = new byte[20];
         private const ushort XInputGuideBit = 0x0400;
         private static ViiperEmulationManager activeInstance;
+        public static ViiperEmulationManager ActiveInstance => activeInstance;
 
         // Rumble-forwarding state for guide-only mode. CE master is OFF in this mode
         // so HidHide isn't suppressing the Legion at all — the Legion's XInput child
@@ -292,8 +293,49 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
                 bool backendOn = settingsManager?.EmulationBackend?.Value ?? false;
                 bool emulationEnabled = legacyManager?.EmulationEnabled ?? true;
 
-                if (backendOn && emulationEnabled)
+                bool isDetached = legionManager?.AnyControllerDetached == true;
+                int preferredMode = Devices.Libraries.Legion.LegionGamepadModeSelectProperty.GetPreferredMode();
+                bool detachedXInputBridge = isDetached && (preferredMode == 1);
+
+                if (backendOn && (emulationEnabled || detachedXInputBridge))
                 {
+                    if (guideOnlyMode && activeDeviceId != 0 && activeDeviceType == "xbox360")
+                    {
+                        PromoteGuideOnlyToLiveBridge(detachedXInputBridge);
+                        return;
+                    }
+
+                    if (isRunning)
+                    {
+                        forwarder.SetInputSource(ResolveInputSource());
+                        if (legacyManager?.EmulationEnabled == true && !viiperOwnsSuppression)
+                        {
+                            try
+                            {
+                                var suppression = legacyManager?.SuppressionManager;
+                                if (suppression != null)
+                                {
+                                    int hideMode = ComputeHideTargetForViiper(activeDeviceType);
+                                    bool ok = suppression.Enable(legacyManager.HandheldDeviceType, hideMode);
+                                    Logger.Info($"VIIPER: HidHide suppression enable => {ok}");
+                                    viiperOwnsSuppression = ok;
+                                }
+                            }
+                            catch (Exception ex) { Logger.Warn($"VIIPER HidHide Enable threw: {ex.Message}"); }
+                        }
+                        else if (legacyManager?.EmulationEnabled == false && viiperOwnsSuppression)
+                        {
+                            try
+                            {
+                                legacyManager?.SuppressionManager?.Disable();
+                                Logger.Info("VIIPER: HidHide suppression disabled");
+                            }
+                            catch (Exception ex) { Logger.Warn($"VIIPER HidHide Disable threw: {ex.Message}"); }
+                            viiperOwnsSuppression = false;
+                        }
+                        return;
+                    }
+
                     if (guideOnlyMode) StopGuideOnly();
                     StartLocked();
                     return;
@@ -308,6 +350,13 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
                 bool legacyPadOwnsGuide = ControllerEmulationManager.CanHandleExternalGuide();
                 if (LabsHasGuideConfigured() && !legacyPadOwnsGuide)
                 {
+                    // Demote in-place if we were running a live bridge on an xbox360 virtual pad
+                    if (isRunning && !emulationEnabled && activeDeviceId != 0 && activeDeviceType == "xbox360")
+                    {
+                        DemoteLiveBridgeToGuideOnly();
+                        return;
+                    }
+
                     // Idempotent: if the guide-only pad is already up, DON'T tear it down and
                     // recreate it. StartGuideOnly runs CleanupAllKnownGhosts, which pnputil-
                     // removes 045E:028E nodes (the guide-only pad's own VID/PID); that removal
@@ -345,6 +394,123 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
         {
             try { ReapplyMode(); }
             catch (Exception ex) { Logger.Warn($"ViiperEmulationManager.OnGuideRouteChanged threw: {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// Re-evaluate mode when controller dock state or wireless receiver connection changes.
+        /// Promotes the guide-only virtual pad to a live XInput bridge when detached, or demotes
+        /// it back when re-docked.
+        /// </summary>
+        public void OnDockStateChanged()
+        {
+            try
+            {
+                if (isRunning)
+                {
+                    forwarder.SetInputSource(ResolveInputSource());
+                }
+                ReapplyMode();
+            }
+            catch (Exception ex) { Logger.Warn($"ViiperEmulationManager.OnDockStateChanged threw: {ex.Message}"); }
+        }
+
+        private void PromoteGuideOnlyToLiveBridge(bool detachedBridge)
+        {
+            if (!guideOnlyMode || activeDeviceId == 0) return;
+
+            try { service.FeedbackReceived -= OnGuideOnlyFeedback; }
+            catch { /* best effort */ }
+
+            if (guideOnlyPhysicalXInputSlot >= 0)
+            {
+                try
+                {
+                    var stop = new ViiperXInputVibration { LeftMotorSpeed = 0, RightMotorSpeed = 0 };
+                    ViiperXInput.SetState((uint)guideOnlyPhysicalXInputSlot, ref stop);
+                }
+                catch { }
+                guideOnlyPhysicalXInputSlot = -1;
+            }
+
+            uint xinputIdx = ViiperInputForwarder.DetectPhysicalXInputIndex();
+            forwarder.SetInputSource(ResolveInputSource());
+            forwarder.SetGyroSource(ResolveGyroSource());
+            forwarder.SetJoyconGyroPerHalf(settingsManager?.ViiperJoyconGyroPerHalf?.Value ?? false);
+            forwarder.SetGuideButtonMode(ResolveGuideMode());
+            forwarder.SetFrontButtonTargets(
+                settingsManager?.ViiperDesktopButtonTarget?.Value ?? "guide",
+                settingsManager?.ViiperPageButtonTarget?.Value ?? "touchpad");
+            forwarder.SetSwapRumbleMotors(settingsManager?.ViiperSwapRumbleMotors?.Value ?? false);
+            forwarder.SetRumbleIntensity(settingsManager?.ViiperRumbleIntensity?.Value ?? 100);
+            forwarder.SetMirrorLightbarToStick(settingsManager?.ViiperMirrorLightbarToStick?.Value ?? false);
+            forwarder.SetGyroAxisMapping(
+                settingsManager?.ViiperGyroAxisMapX?.Value ?? "X",
+                settingsManager?.ViiperGyroAxisMapY?.Value ?? "Y",
+                settingsManager?.ViiperGyroAxisMapZ?.Value ?? "Z");
+            ApplyTuningForActiveSource();
+            forwarder.SetStickTriggerConfig(StickTriggerConfigBundle.Deserialize(
+                settingsManager?.ViiperStickTriggerConfig?.Value ?? string.Empty));
+            forwarder.SetDesktopControlsActive(legionManager?.LegionDesktopControls?.Value ?? false);
+            forwarder.Start(xinputIdx, activeBusId, activeDeviceId, activeDeviceType);
+            forwarder.SetSecondaryDevice(0);
+
+            guideOnlyMode = false;
+            isRunning = true;
+
+            if (!detachedBridge && legacyManager?.EmulationEnabled == true)
+            {
+                try
+                {
+                    var suppression = legacyManager?.SuppressionManager;
+                    if (suppression != null)
+                    {
+                        int hideMode = ComputeHideTargetForViiper(activeDeviceType);
+                        bool ok = suppression.Enable(legacyManager.HandheldDeviceType, hideMode);
+                        Logger.Info($"VIIPER: HidHide suppression enable on promote => {ok}");
+                        viiperOwnsSuppression = ok;
+                    }
+                }
+                catch (Exception ex) { Logger.Warn($"VIIPER HidHide Enable on promote threw: {ex.Message}"); }
+            }
+
+            Logger.Info($"VIIPER promoted guide-only to live bridge (bus={activeBusId}, dev={activeDeviceId}, detachedBridge={detachedBridge})");
+            Program.NotifyGuideRouteChanged();
+        }
+
+        private void DemoteLiveBridgeToGuideOnly()
+        {
+            if (!isRunning) return;
+
+            try { forwarder.Stop(); }
+            catch (Exception ex) { Logger.Warn($"forwarder.Stop threw on demote: {ex.Message}"); }
+
+            if (viiperOwnsSuppression)
+            {
+                try
+                {
+                    legacyManager?.SuppressionManager?.Disable();
+                    Logger.Info("VIIPER: HidHide suppression disabled on demote");
+                }
+                catch (Exception ex) { Logger.Warn($"VIIPER HidHide Disable threw on demote: {ex.Message}"); }
+                viiperOwnsSuppression = false;
+            }
+
+            isRunning = false;
+            guideOnlyMode = true;
+
+            SubmitGuideOnlyFrame(false);
+
+            try { service.FeedbackReceived += OnGuideOnlyFeedback; }
+            catch { }
+
+            System.Threading.Tasks.Task.Run(async () =>
+            {
+                await System.Threading.Tasks.Task.Delay(1200);
+                DetectGuideOnlyLegionSlot();
+            });
+
+            Logger.Info($"VIIPER demoted live bridge to guide-only (bus={activeBusId}, dev={activeDeviceId})");
+            Program.NotifyGuideRouteChanged();
         }
 
         /// <summary>
@@ -703,26 +869,38 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
             // double input on Game Bar (Legion XInput + virtual DSE HID).
             string targetType;
             ushort vid, pid;
-            ResolveDeviceTargets(out targetType, out vid, out pid);
+            if (legacyManager?.EmulationEnabled != true)
+            {
+                targetType = DefaultDeviceType;
+                vid = 0;
+                pid = 0;
+            }
+            else
+            {
+                ResolveDeviceTargets(out targetType, out vid, out pid);
+            }
 
             // Enable HidHide so the stock physical controller is hidden from games while
             // VIIPER is active. Reuses the existing ControllerSuppressionManager instance
             // owned by the legacy manager — sharing the same underlying hide/unhide state
             // prevents both backends from fighting over the same device IDs.
-            try
+            if (legacyManager?.EmulationEnabled == true)
             {
-                var suppression = legacyManager?.SuppressionManager;
-                if (suppression != null)
+                try
                 {
-                    int hideMode = ComputeHideTargetForViiper(targetType);
-                    bool ok = suppression.Enable(
-                        legacyManager.HandheldDeviceType,
-                        hideMode);
-                    Logger.Info($"VIIPER: HidHide suppression enable (target={targetType}, hideMode={hideMode}) => {ok}");
-                    viiperOwnsSuppression = ok;
+                    var suppression = legacyManager?.SuppressionManager;
+                    if (suppression != null)
+                    {
+                        int hideMode = ComputeHideTargetForViiper(targetType);
+                        bool ok = suppression.Enable(
+                            legacyManager.HandheldDeviceType,
+                            hideMode);
+                        Logger.Info($"VIIPER: HidHide suppression enable (target={targetType}, hideMode={hideMode}) => {ok}");
+                        viiperOwnsSuppression = ok;
+                    }
                 }
+                catch (Exception ex) { Logger.Warn($"VIIPER HidHide Enable threw: {ex.Message}"); }
             }
-            catch (Exception ex) { Logger.Warn($"VIIPER HidHide Enable threw: {ex.Message}"); }
 
             // Firmware-level XInput suppression (register 04/0f) is NO LONGER applied
             // automatically on emulation start. It also disables the firmware's front-button
@@ -913,7 +1091,25 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
 
         private ViiperInputSourceKind ResolveInputSource()
         {
-            var value = settingsManager?.ViiperInputSource?.Value ?? "XInput";
+            if (legionManager?.AnyControllerDetached == true)
+            {
+                return ViiperInputSourceKind.LegionHid;
+            }
+
+            var value = settingsManager?.ViiperInputSource?.Value;
+            // On Legion hardware, prefer LegionHid (raw USB HID).
+            // Windows blocks background apps from polling XInput when Xbox Game Bar or
+            // system overlays are focused, freezing the emulated controller. LegionHid reads
+            // directly from USB HID at 500Hz without Windows XInput blocking, ensuring
+            // smooth Game Bar controller navigation and access to back paddles & gyro.
+            if (legionManager?.LegionGoDetected?.Value == true)
+            {
+                if (string.IsNullOrEmpty(value) || !string.Equals(value, "XInput", StringComparison.OrdinalIgnoreCase))
+                {
+                    return ViiperInputSourceKind.LegionHid;
+                }
+            }
+
             if (string.Equals(value, "LegionHid", StringComparison.OrdinalIgnoreCase))
             {
                 return ViiperInputSourceKind.LegionHid;

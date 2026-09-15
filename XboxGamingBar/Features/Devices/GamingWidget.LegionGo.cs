@@ -1,4 +1,4 @@
-﻿using Microsoft.Gaming.XboxGameBar;
+using Microsoft.Gaming.XboxGameBar;
 using Microsoft.Gaming.XboxGameBar.Input;
 using Microsoft.UI.Xaml.Controls;
 using NLog;
@@ -1193,6 +1193,8 @@ namespace XboxGamingBar
                 }
                 currentDefaultGameProfile = null;
             }
+
+            UpdateDefaultProfileStatus();
         }
 
         /// <summary>
@@ -1305,59 +1307,106 @@ namespace XboxGamingBar
                     string targetProfile = GetTargetProfileName();
                     Logger.Info($"DGP disabled - loading profile for current power state: {targetProfile}");
                     LoadProfileSettings(targetProfile, isExplicitSwitch: false);
+
+                    // Update TDP controls enabled state (now with correct values if disabling)
+                    UpdateTDPControlsForDefaultProfile(false);
+
+                    // Update per-game profile toggle state
+                    UpdatePerGameProfileForDefaultProfile(false);
                 }
                 finally
                 {
                     isRestoringFromDefaultProfile = false;
                 }
             }
-
-            // Update TDP controls enabled state (now with correct values if disabling)
-            UpdateTDPControlsForDefaultProfile(enabled);
-
-            // Update per-game profile toggle state
-            UpdatePerGameProfileForDefaultProfile(enabled);
-
-            if (enabled && currentDefaultGameProfile.HasValue)
+            else
             {
-                var profile = currentDefaultGameProfile.Value;
+                // Update TDP controls enabled state (keep enabled for fine-tuning)
+                UpdateTDPControlsForDefaultProfile(true);
 
-                // Save original FPS limit state before changing
-                if (FPSLimitToggle != null && !originalFpsLimitToggleState.HasValue)
-                {
-                    originalFpsLimitToggleState = FPSLimitToggle.IsOn;
-                    originalFpsLimitSliderValue = FPSLimitSlider?.Value ?? 60;
-                    Logger.Info($"Saved original FPS limit state: toggle={originalFpsLimitToggleState}, value={originalFpsLimitSliderValue}");
-                }
+                // Update per-game profile toggle state
+                UpdatePerGameProfileForDefaultProfile(true);
 
-                // Save original TDP slider value before changing
-                if (TDPSlider != null && !originalTdpSliderValue.HasValue)
+                if (currentDefaultGameProfile.HasValue)
                 {
-                    originalTdpSliderValue = TDPSlider.Value;
-                    Logger.Info($"Saved original TDP slider value: {originalTdpSliderValue}W");
-                }
-
-                // Sync FPS limit toggle and slider to match profile
-                if (profile.FrameCap.HasValue && profile.FrameCap.Value > 0)
-                {
-                    if (FPSLimitToggle != null)
+                    isApplyingDefaultProfile = true;
+                    try
                     {
-                        FPSLimitToggle.IsOn = true;
-                    }
-                    if (FPSLimitSlider != null)
-                    {
-                        FPSLimitSlider.Value = profile.FrameCap.Value;
-                    }
-                    Logger.Info($"FPS limit synced to default profile: {profile.FrameCap.Value}fps");
-                }
+                        var profile = currentDefaultGameProfile.Value;
 
-                // Sync TDP slider to match profile
-                if (profile.TDP > 0 && TDPSlider != null)
-                {
-                    TDPSlider.Value = profile.TDP;
-                    Logger.Info($"TDP slider synced to default profile: {profile.TDP}W");
+                        // Save original FPS limit state before changing
+                        if (FPSLimitToggle != null && !originalFpsLimitToggleState.HasValue)
+                        {
+                            originalFpsLimitToggleState = FPSLimitToggle.IsOn;
+                            originalFpsLimitSliderValue = FPSLimitSlider?.Value ?? 60;
+                            Logger.Info($"Saved original FPS limit state: toggle={originalFpsLimitToggleState}, value={originalFpsLimitSliderValue}");
+                        }
+
+                        // Save original TDP slider value before changing
+                        if (TDPSlider != null && !originalTdpSliderValue.HasValue)
+                        {
+                            originalTdpSliderValue = TDPSlider.Value;
+                            Logger.Info($"Saved original TDP slider value: {originalTdpSliderValue}W");
+                        }
+
+                        // Ensure Custom TDP mode is active so TDP slider and controls are available
+                        if (!IsCustomTdpModeSelected())
+                        {
+                            legionPerformanceMode?.SetValue(255);
+                            int customIndex = GetCustomTdpModeIndex();
+                            if (TDPModeComboBox != null && TDPModeComboBox.SelectedIndex != customIndex)
+                            {
+                                isUpdatingTDPMode = true;
+                                TDPModeComboBox.SelectedIndex = customIndex;
+                                lastTDPModeIndex = customIndex;
+                                isUpdatingTDPMode = false;
+                                UpdateTDPSliderEnabledState();
+                            }
+                            if (LegionPerformanceModeComboBox != null && LegionPerformanceModeComboBox.SelectedIndex != customIndex)
+                            {
+                                LegionPerformanceModeComboBox.SelectedIndex = customIndex;
+                            }
+                        }
+
+                        // Sync FPS limit toggle and slider to match profile
+                        if (profile.FrameCap.HasValue && profile.FrameCap.Value > 0)
+                        {
+                            if (FPSLimitToggle != null)
+                            {
+                                FPSLimitToggle.IsOn = true;
+                            }
+                            if (FPSLimitSlider != null)
+                            {
+                                FPSLimitSlider.Value = profile.FrameCap.Value;
+                            }
+                            if (fpsLimit != null)
+                            {
+                                fpsLimit.SetValue(profile.FrameCap.Value);
+                            }
+                            Logger.Info($"FPS limit synced to default profile: {profile.FrameCap.Value}fps");
+                        }
+
+                        // Sync TDP slider to match profile
+                        if (profile.TDP > 0 && TDPSlider != null)
+                        {
+                            TDPSlider.Value = profile.TDP;
+                            targetTDPLimit = profile.TDP;
+                            if (tdp != null)
+                            {
+                                tdp.SetValue(profile.TDP);
+                            }
+                            Logger.Info($"TDP slider synced to default profile: {profile.TDP}W");
+                        }
+                    }
+                    finally
+                    {
+                        isApplyingDefaultProfile = false;
+                    }
                 }
             }
+
+            // Update status badge & reset button
+            UpdateDefaultProfileStatus();
 
             // Update Quick tab tile styling
             UpdateQuickSettingsTileStates();
@@ -1371,104 +1420,51 @@ namespace XboxGamingBar
         private double? originalFpsLimitSliderValue;
         private double? originalTdpSliderValue;
         private bool isRestoringFromDefaultProfile; // Flag to suppress profile saves during DGP restoration
+        private bool isApplyingDefaultProfile; // Flag to suppress profile saves during DGP application
 
         /// <summary>
         /// Updates per-game profile toggle state based on Default Game Profile.
         /// </summary>
         private void UpdatePerGameProfileForDefaultProfile(bool defaultProfileEnabled)
         {
-            if (defaultProfileEnabled)
+            // Keep Active Profile card visible so user knows what profile they are on
+            if (ActiveProfileCard != null)
             {
-                // Hide the Active Profile card when default game profile is enabled
-                if (ActiveProfileCard != null)
-                {
-                    ActiveProfileCard.Visibility = Visibility.Collapsed;
-                }
-
-                Logger.Debug("Active Profile card hidden - Default Game Profile is active");
+                ActiveProfileCard.Visibility = Visibility.Visible;
             }
-            else
+
+            // Re-enable the per-game profile toggle
+            if (PerGameProfileToggle != null)
             {
-                // Show the Active Profile card when default game profile is disabled
-                if (ActiveProfileCard != null)
-                {
-                    ActiveProfileCard.Visibility = Visibility.Visible;
-                }
-
-                // Re-enable the per-game profile toggle
-                if (PerGameProfileToggle != null)
-                {
-                    PerGameProfileToggle.IsEnabled = runningGame?.Value.IsValid() == true;
-                }
-
-                Logger.Debug("Active Profile card shown - Default Game Profile is inactive");
+                PerGameProfileToggle.IsEnabled = runningGame?.Value.IsValid() == true;
             }
+
+            Logger.Debug($"Active Profile card shown (defaultProfileEnabled={defaultProfileEnabled})");
         }
 
         /// <summary>
         /// Updates TDP control enabled states based on Default Game Profile.
+        /// With Option A, manual controls remain enabled for fine-tuning.
         /// </summary>
         private void UpdateTDPControlsForDefaultProfile(bool defaultProfileEnabled)
         {
-            if (defaultProfileEnabled)
+            if (TDPModeComboBox != null)
             {
-                // Disable TDP controls when default profile is active
-                if (TDPModeComboBox != null)
-                {
-                    TDPModeComboBox.IsEnabled = false;
-                }
-                if (TDPSlider != null)
-                {
-                    TDPSlider.IsEnabled = false;
-                }
-                if (TDPBoostToggle != null)
-                {
-                    TDPBoostToggle.IsEnabled = false;
-                }
-                if (AutoTDPToggle != null)
-                {
-                    AutoTDPToggle.IsEnabled = false;
-                }
-                if (StickyTDPToggle != null)
-                {
-                    StickyTDPToggle.IsEnabled = false;
-                }
-
-                // Also disable FPS limit controls (controlled by Default Game Profile)
-                if (FPSLimitToggle != null)
-                {
-                    FPSLimitToggle.IsEnabled = false;
-                }
-                if (FPSLimitSlider != null)
-                {
-                    FPSLimitSlider.IsEnabled = false;
-                }
-
-                Logger.Debug("TDP and FPS controls disabled - Default Game Profile is active");
+                TDPModeComboBox.IsEnabled = true;
             }
-            else
+            if (FPSLimitToggle != null)
             {
-                // Re-enable TDP controls based on current mode
-                if (TDPModeComboBox != null)
-                {
-                    TDPModeComboBox.IsEnabled = true;
-                }
-
-                // Re-enable FPS limit controls
-                if (FPSLimitToggle != null)
-                {
-                    FPSLimitToggle.IsEnabled = true;
-                }
-                if (FPSLimitSlider != null)
-                {
-                    FPSLimitSlider.IsEnabled = true;
-                }
-
-                // Re-evaluate other controls based on current TDP mode
-                UpdateTDPSliderEnabledState();
-
-                Logger.Debug("TDP and FPS controls re-enabled - Default Game Profile is inactive");
+                FPSLimitToggle.IsEnabled = true;
             }
+            if (FPSLimitSlider != null)
+            {
+                FPSLimitSlider.IsEnabled = true;
+            }
+
+            // Re-evaluate TDP slider and extra controls based on current TDP mode
+            UpdateTDPSliderEnabledState();
+
+            Logger.Debug($"TDP and FPS controls updated for DGP (defaultProfileEnabled={defaultProfileEnabled})");
         }
 
         /// <summary>
@@ -2123,8 +2119,8 @@ namespace XboxGamingBar
 
             // Save profile when TDP Mode changes (if not during initialization or helper update)
             // Allow save if user-initiated from Quick Tab tile (bypasses isApplyingHelperUpdate)
-            // Don't save when Default Game Profile is active (to avoid contaminating user's profile)
-            if (!isInitialSync && !isLoadingProfile && SaveTDP && (!isApplyingHelperUpdate || isUserInitiatedTDPModeChange) && defaultGameProfileEnabled?.Value != true)
+            // Don't save when Default Game Profile is applying or restoring
+            if (!isInitialSync && !isLoadingProfile && SaveTDP && (!isApplyingHelperUpdate || isUserInitiatedTDPModeChange) && !isApplyingDefaultProfile && !isRestoringFromDefaultProfile)
             {
                 // Don't save to game profile if per-game profile is disabled.
                 // During game close, helper sends global mode via pipe → ComboBox changes → handler fires.
@@ -2132,7 +2128,8 @@ namespace XboxGamingBar
                 // currentProfileName still points to the game profile (SwitchProfile hasn't run yet).
                 // Without this check, the global mode gets saved to the game profile, corrupting it.
                 bool isGameProfile = currentProfileName?.StartsWith("Game_") == true;
-                if (isGameProfile && perGameProfile?.Value != true)
+                bool isDgpActive = defaultGameProfileEnabled?.Value == true;
+                if (isGameProfile && perGameProfile?.Value != true && !isDgpActive)
                 {
                     Logger.Warn($"TDP Mode save skipped: per-game profile is disabled but currentProfileName is still '{currentProfileName}' (game closing)");
                 }
@@ -2144,7 +2141,7 @@ namespace XboxGamingBar
             }
             else
             {
-                Logger.Warn($"TDP Mode save skipped: isInitialSync={isInitialSync}, isApplyingHelperUpdate={isApplyingHelperUpdate}, isLoadingProfile={isLoadingProfile}, SaveTDP={SaveTDP}, isUserInitiatedTDPModeChange={isUserInitiatedTDPModeChange}, defaultGameProfile={defaultGameProfileEnabled?.Value}");
+                Logger.Warn($"TDP Mode save skipped: isInitialSync={isInitialSync}, isApplyingHelperUpdate={isApplyingHelperUpdate}, isLoadingProfile={isLoadingProfile}, SaveTDP={SaveTDP}, isUserInitiatedTDPModeChange={isUserInitiatedTDPModeChange}, applyingDGP={isApplyingDefaultProfile}, restoringDGP={isRestoringFromDefaultProfile}");
             }
         }
 
@@ -2156,13 +2153,6 @@ namespace XboxGamingBar
         private void UpdateTDPSliderEnabledState()
         {
             if (TDPSlider == null) return;
-
-            // If Default Game Profile is active, keep TDP controls disabled
-            if (defaultGameProfileEnabled?.Value == true)
-            {
-                Logger.Debug("TDP slider state update skipped - Default Game Profile is active");
-                return;
-            }
 
             // Check if in Custom mode (uses preset system for proper detection)
             bool isCustomMode = IsCustomTdpModeSelected();
@@ -2432,6 +2422,8 @@ namespace XboxGamingBar
             {
                 UpdateTDPDisplayText();
             }
+
+            UpdateDefaultProfileStatus();
         }
 
         /// <summary>
@@ -2449,6 +2441,112 @@ namespace XboxGamingBar
             // Note: CurrentTDPValueText is updated by the helper with actual hardware limits
             // via CurrentTDPProperty. Don't set it here - slider values would overwrite
             // the detailed hardware readout (e.g., "S:21W F:21W L:21W").
+        }
+
+        /// <summary>
+        /// Updates the status text, subtitle, and reset button visibility for Default Game Profile.
+        /// Reflects whether settings are pure recommended defaults or customized by the user.
+        /// </summary>
+        private void UpdateDefaultProfileStatus()
+        {
+            if (DefaultProfileStatusText == null) return;
+
+            bool isDgpActive = defaultGameProfileEnabled?.Value == true;
+            if (!isDgpActive || !currentDefaultGameProfile.HasValue)
+            {
+                DefaultProfileStatusText.Visibility = Visibility.Collapsed;
+                if (DefaultProfileCustomSubtitle != null) DefaultProfileCustomSubtitle.Visibility = Visibility.Collapsed;
+                if (DefaultProfileResetButton != null) DefaultProfileResetButton.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            var profile = currentDefaultGameProfile.Value;
+            int defaultTdp = profile.TDP;
+            int defaultFps = (profile.FrameCap.HasValue && profile.FrameCap.Value > 0) ? profile.FrameCap.Value : 0;
+
+            int currentTdp = TDPSlider != null ? (int)Math.Round(TDPSlider.Value) : defaultTdp;
+            int currentFps = (FPSLimitToggle?.IsOn == true && FPSLimitSlider != null) ? (int)Math.Round(FPSLimitSlider.Value) : 0;
+
+            bool isTdpDifferent = (defaultTdp > 0 && currentTdp != defaultTdp);
+            bool isFpsDifferent = (currentFps != defaultFps);
+            bool isCustomized = isTdpDifferent || isFpsDifferent;
+
+            DefaultProfileStatusText.Visibility = Visibility.Visible;
+            if (isCustomized)
+            {
+                string fpsSnippet = currentFps > 0 ? $" - {currentFps}fps" : "";
+                DefaultProfileStatusText.Text = $"● Customized ({currentTdp}W{fpsSnippet})";
+                DefaultProfileStatusText.Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 255, 180, 0)); // Gold #FFB400
+
+                if (DefaultProfileCustomSubtitle != null)
+                {
+                    DefaultProfileCustomSubtitle.Visibility = Visibility.Visible;
+                }
+                if (DefaultProfileResetButton != null)
+                {
+                    DefaultProfileResetButton.Visibility = Visibility.Visible;
+                }
+            }
+            else
+            {
+                DefaultProfileStatusText.Text = "● Default Active";
+                DefaultProfileStatusText.Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0, 200, 255)); // Cyan #00C8FF
+
+                if (DefaultProfileCustomSubtitle != null)
+                {
+                    DefaultProfileCustomSubtitle.Visibility = Visibility.Collapsed;
+                }
+                if (DefaultProfileResetButton != null)
+                {
+                    DefaultProfileResetButton.Visibility = Visibility.Collapsed;
+                }
+            }
+        }
+
+        private void DefaultProfileResetButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (!currentDefaultGameProfile.HasValue) return;
+
+            var profile = currentDefaultGameProfile.Value;
+            Logger.Info($"DefaultProfileResetButton clicked: restoring defaults TDP={profile.TDP}W, FPS={profile.FrameCap}");
+
+            isApplyingDefaultProfile = true;
+            try
+            {
+                // Reset FPS limit
+                if (profile.FrameCap.HasValue && profile.FrameCap.Value > 0)
+                {
+                    if (FPSLimitToggle != null) FPSLimitToggle.IsOn = true;
+                    if (FPSLimitSlider != null) FPSLimitSlider.Value = profile.FrameCap.Value;
+                    if (fpsLimit != null) fpsLimit.SetValue(profile.FrameCap.Value);
+                }
+                else
+                {
+                    if (FPSLimitToggle != null) FPSLimitToggle.IsOn = false;
+                    if (fpsLimit != null) fpsLimit.SetValue(0);
+                }
+
+                // Reset TDP
+                if (profile.TDP > 0 && TDPSlider != null)
+                {
+                    TDPSlider.Value = profile.TDP;
+                    targetTDPLimit = profile.TDP;
+                    if (tdp != null) tdp.SetValue(profile.TDP);
+                }
+            }
+            finally
+            {
+                isApplyingDefaultProfile = false;
+            }
+
+            // Save the reset baseline to the per-game profile
+            if (HasValidGame(currentGameName))
+            {
+                SaveCurrentSettingsToProfile(currentProfileName);
+            }
+
+            UpdateDefaultProfileStatus();
+            UpdateQuickSettingsTileStates();
         }
 
     }

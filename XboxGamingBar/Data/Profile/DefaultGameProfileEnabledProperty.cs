@@ -15,6 +15,8 @@ namespace XboxGamingBar.Data
         private readonly Page owner;
         private ToggleSwitch toggle;
         private Action<bool> enabledCallback;
+        private bool lastCallbackValue;
+        private bool hasInvokedCallback;
 
         public DefaultGameProfileEnabledProperty(Page inOwner) : base(false, null, Function.DefaultGameProfileEnabled)
         {
@@ -27,6 +29,8 @@ namespace XboxGamingBar.Data
         public void SetEnabledCallback(Action<bool> callback)
         {
             enabledCallback = callback;
+            lastCallbackValue = Value;
+            hasInvokedCallback = true;
             // Invoke immediately with current value
             callback?.Invoke(Value);
         }
@@ -55,6 +59,8 @@ namespace XboxGamingBar.Data
         {
             if (toggle != null)
             {
+                lastCallbackValue = toggle.IsOn;
+                hasInvokedCallback = true;
                 SetValue(toggle.IsOn, DateTime.Now.Ticks);
                 // Invoke callback immediately for responsive UI
                 enabledCallback?.Invoke(toggle.IsOn);
@@ -76,8 +82,14 @@ namespace XboxGamingBar.Data
                         toggle.IsOn = Value;
                         toggle.Toggled += Toggle_Toggled;
                     }
-                    // Invoke callback when value changes from helper
-                    enabledCallback?.Invoke(Value);
+                    // Only invoke callback if value genuinely changed from an external source (e.g. helper)
+                    // and not already handled by Toggle_Toggled
+                    if (!hasInvokedCallback || lastCallbackValue != Value)
+                    {
+                        lastCallbackValue = Value;
+                        hasInvokedCallback = true;
+                        enabledCallback?.Invoke(Value);
+                    }
                 });
             }
         }

@@ -118,6 +118,9 @@ namespace XboxGamingBarHelper
         private static DefaultGameProfileManager defaultGameProfileManager;
         private static List<IManager> Managers;
 
+        internal static SettingsManager SettingsManager => settingsManager;
+        internal static SystemManager SystemManager => systemManager;
+
         public static OnScreenDisplayProperty onScreenDisplay;
         public static List<OnScreenDisplayManager> onScreenDisplayProviders;
 

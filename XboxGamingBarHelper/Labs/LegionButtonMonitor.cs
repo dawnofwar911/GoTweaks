@@ -104,6 +104,7 @@ namespace XboxGamingBarHelper.Labs
         private const float LEGACY_M8_GYRO_SCALE_DEG_PER_SECOND = 2000.0f / 128.0f;
         private const byte LEGION_CONTROLLER_LEFT_ID = 0x03;
         private const byte LEGION_CONTROLLER_RIGHT_ID = 0x04;
+        private const byte LEGION_RECEIVER_GLOBAL_ID = 0x00;
         private const ushort LEGION_AUX_MODE = 0x0001;
         private const ushort LEGION_AUX_SHARE = 0x0002;
         private const ushort LEGION_AUX_EXTRA_L1 = 0x0004;
@@ -256,7 +257,9 @@ namespace XboxGamingBarHelper.Labs
             // space ([cmd][sub] with GET_VERSION=0x01 etc.), so these bytes would be
             // protocol nonsense there (hid-lenovo-go-s.c cross-ref, 2026-07-23).
             if (IsGoSControllerDevice()) return;
-            SendOutputReport(handle, new byte[] { 0x05, 0x00, 0x03, 0x0E, 0x03 }, "get gamepad mode");
+            SendOutputReport(handle, new byte[] { 0x05, 0x00, 0x03, 0x0E, LEGION_RECEIVER_GLOBAL_ID }, "get gamepad mode (receiver)");
+            SendOutputReport(handle, new byte[] { 0x05, 0x00, 0x03, 0x0E, LEGION_CONTROLLER_LEFT_ID }, "get gamepad mode (left)");
+            SendOutputReport(handle, new byte[] { 0x05, 0x00, 0x03, 0x0E, LEGION_CONTROLLER_RIGHT_ID }, "get gamepad mode (right)");
             SendOutputReport(handle, new byte[] { 0x05, 0x00, 0x03, 0x0B, 0x03 }, "get fps switch");
             SendOutputReport(handle, new byte[] { 0x05, 0x00, 0x02, 0x04, 0x01 }, "get mcu fw version");
             SendOutputReport(handle, new byte[] { 0x05, 0x00, 0x0F, 0x03 }, "get rgb active profile");
@@ -276,14 +279,31 @@ namespace XboxGamingBarHelper.Labs
             return ok;
         }
 
-        /// <summary>Switches the gamepad protocol (1=xinput 2=dinput). The receiver
-        /// re-enumerates; the per-connect init re-reads the mode for the pill/dropdown.</summary>
+        /// <summary>Switches the gamepad protocol (1=xinput 2=dinput 3=dual-dinput).
+        /// Writes to 0x00 (receiver / global), 0x03 (left), and 0x04 (right). In detached mode,
+        /// writing to 0x00 is required for the USB receiver to switch modes, while 0x03 and 0x04
+        /// configure the wireless controller halves.</summary>
         public bool ApplyGamepadMode(int mode)
         {
             var handle = hidHandle;
             if (handle == null || handle.IsInvalid || !_hasWriteAccess || IsGoSControllerDevice()) return false;
-            if (mode != 1 && mode != 2) return false;
-            return SendOutputReport(handle, new byte[] { 0x05, 0x00, 0x04, 0x0E, 0x03, (byte)mode }, $"set gamepad mode {(mode == 1 ? "xinput" : "dinput")}");
+            if (mode != 1 && mode != 2 && mode != 3) return false;
+
+            string modeDesc = mode == 1 ? "xinput" : (mode == 2 ? "dinput" : "dual-dinput");
+            bool ok = SendOutputReport(handle, new byte[] { 0x05, 0x00, 0x04, 0x0E, LEGION_RECEIVER_GLOBAL_ID, (byte)mode }, $"set gamepad mode (receiver) {modeDesc}");
+            SendOutputReport(handle, new byte[] { 0x05, 0x00, 0x04, 0x0E, LEGION_CONTROLLER_LEFT_ID, (byte)mode }, $"set gamepad mode (left) {modeDesc}");
+            SendOutputReport(handle, new byte[] { 0x05, 0x00, 0x04, 0x0E, LEGION_CONTROLLER_RIGHT_ID, (byte)mode }, $"set gamepad mode (right) {modeDesc}");
+
+            if (mode == 1 && !_physicalXInputSuppressed)
+            {
+                // Ensure physical XInput output register (04/0f) is asserted on receiver and both halves
+                SendOutputReport(handle, new byte[] { 0x05, 0x00, 0x04, 0x0F, LEGION_RECEIVER_GLOBAL_ID, 0x01 }, "xinput-output on (receiver)");
+                SendOutputReport(handle, new byte[] { 0x05, 0x00, 0x04, 0x0F, LEGION_CONTROLLER_LEFT_ID, 0x01 }, "xinput-output on (left)");
+                SendOutputReport(handle, new byte[] { 0x05, 0x00, 0x04, 0x0F, LEGION_CONTROLLER_RIGHT_ID, 0x01 }, "xinput-output on (right)");
+            }
+
+            QueryInputMode();
+            return ok;
         }
 
         // Desired state of the physical pad's XInput output (firmware register 04/0f).
@@ -1304,7 +1324,7 @@ namespace XboxGamingBarHelper.Labs
         /// <summary>
         /// Get whether the controller is in detached/uninitialized mode.
         /// </summary>
-        public bool IsDetachedMode => isDetachedMode;
+        public bool IsDetachedMode => isDetachedMode || _detectedPid == 0x61ED || _detectedPid == 0x61EC || !_lastLeftDocked || !_lastRightDocked;
 
         /// <summary>
         /// Start monitoring the configured Legion buttons (L and/or R).
@@ -1760,6 +1780,12 @@ namespace XboxGamingBarHelper.Labs
             switch (actionType)
             {
                 case LegionButtonAction.XboxGuide:
+                    if (TryHandleSteamGuideOverlay())
+                    {
+                        Logger.Info($"LegionButtonMonitor: Steam overlay/menu handled for scroll ({actionName})");
+                        break;
+                    }
+
                     // VIIPER backend intercept for scroll-triggered Guide (Native → injects
                     // a short Guide press into the emulated wire state; GameBar → Win+G).
                     if (XboxGamingBarHelper.ControllerEmulation.Viiper.ViiperInputForwarder.TryHandleGuidePressFromLabs())
@@ -2481,6 +2507,26 @@ namespace XboxGamingBarHelper.Labs
                 // (a reconnect while suppressed must re-clear Desktop/Page, else the stock
                 // Win+D / Win+Tab shortcuts come back).
                 ApplyFrontButtonFirmwareState(handle);
+
+                // Auto-restore preferred gamepad mode on connection / re-enumeration:
+                // When docked in PID 0x61EB, if the controller was in DInput (mode=2), restore XInput.
+                // When detached, the wireless receiver (0x61ED/0x61EC) does not support hardware XInput switching;
+                // detached XInput is seamlessly handled via software bridging in VIIPER.
+                try
+                {
+                    int preferredMode = Devices.Libraries.Legion.LegionGamepadModeSelectProperty.GetPreferredMode();
+                    bool isDetached = _detectedPid == 0x61ED || _detectedPid == 0x61EC || !_lastLeftDocked || !_lastRightDocked;
+                    if (!isDetached && preferredMode == 1 && (_lastGamepadMode == 2 || _lastGamepadMode == 3))
+                    {
+                        Logger.Info($"LegionButtonMonitor: Connected docked in PID 0x{_detectedPid:X4} (mode={_lastGamepadMode}), restoring preferred XInput mode");
+                        ApplyGamepadMode(1);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn($"LegionButtonMonitor: Auto-restore preferred mode failed: {ex.Message}");
+                }
+
                 Logger.Info($"LegionButtonMonitor: Wrote XInput coexistence registers ({ok}/{total}, xinput={(!_physicalXInputSuppressed ? "ON" : "SUPPRESSED (emu)")})");
             }
             catch (Exception ex)
@@ -3333,11 +3379,21 @@ namespace XboxGamingBarHelper.Labs
                                             try { OsReportingUpdated?.Invoke(disabled); } catch { }
                                         }
                                     }
-                                    int display = _lastFpsSwitch == 2 ? 3 : _lastGamepadMode; // FPS overrides
+                                    int display;
+                                    bool isDetachedNow = isDetachedMode || _detectedPid == 0x61ED || _detectedPid == 0x61EC || !_lastLeftDocked || !_lastRightDocked;
+                                    if (_lastFpsSwitch == 2) display = 3; // FPS switch hardware override
+                                    else if (isDetachedNow && Devices.Libraries.Legion.LegionGamepadModeSelectProperty.GetPreferredMode() == 1)
+                                    {
+                                        display = 1; // XInput (wirelessly bridged via virtual controller)
+                                    }
+                                    else if (_lastGamepadMode == 3) display = 4; // Dual D-Input (detached)
+                                    else display = _lastGamepadMode; // 1 = XInput, 2 = DInput
+
                                     if (display != _lastReportedInputMode && display != 0)
                                     {
                                         _lastReportedInputMode = display;
-                                        Logger.Info($"LegionButtonMonitor: input mode -> {(display == 1 ? "XInput" : display == 2 ? "DInput" : "FPS")} (mode={_lastGamepadMode}, fps={_lastFpsSwitch})");
+                                        string modeStr = display == 1 ? "XInput" : display == 2 ? "DInput" : display == 3 ? "FPS" : "Dual D-Input";
+                                        Logger.Info($"LegionButtonMonitor: input mode -> {modeStr} (mode={_lastGamepadMode}, fps={_lastFpsSwitch})");
                                         try { InputModeUpdated?.Invoke(display); } catch { }
                                     }
                                 }
@@ -3431,14 +3487,15 @@ namespace XboxGamingBarHelper.Labs
                                     bool leftCharging = leftConnected && leftChargingByte == 0x02;
                                     bool rightCharging = rightConnected && rightChargingByte == 0x02;
 
-                                    // Fire event if values changed AND throttle time has passed
+                                    // Fire event if values changed AND throttle time has passed (dock state changes fire immediately)
+                                    bool dockStateChanged = leftDocked != _lastLeftDocked || rightDocked != _lastRightDocked;
                                     bool valuesChanged = leftBattery != _lastLeftBattery || rightBattery != _lastRightBattery ||
                                         leftCharging != _lastLeftCharging || rightCharging != _lastRightCharging ||
                                         leftConnected != _lastLeftConnected || rightConnected != _lastRightConnected ||
-                                        leftDocked != _lastLeftDocked || rightDocked != _lastRightDocked;
+                                        dockStateChanged;
                                     bool throttleExpired = (DateTime.Now - _lastBatteryUpdateTime).TotalMilliseconds >= BATTERY_UPDATE_THROTTLE_MS;
 
-                                    if (valuesChanged && throttleExpired)
+                                    if (dockStateChanged || (valuesChanged && throttleExpired))
                                     {
                                         _lastLeftBattery = leftBattery;
                                         _lastRightBattery = rightBattery;
@@ -4465,6 +4522,17 @@ namespace XboxGamingBarHelper.Labs
                 switch (actionType)
                 {
                     case LegionButtonAction.XboxGuide:
+                        // Check if Steam UI (Big Picture) or a Steam game is active. If so,
+                        // handle the Guide press by emitting Steam's overlay/menu shortcut (Ctrl+1 / Shift+Tab)
+                        // and suppress the raw virtual Xbox Guide pulse. On Windows, emitting a raw
+                        // Guide button on an Xbox controller causes the OS Game Bar service to capture
+                        // the button and steal focus from Steam.
+                        if (TryHandleSteamGuideOverlay())
+                        {
+                            Logger.Info($"LegionButtonMonitor: Steam overlay/menu handled for {buttonName} (raw Guide suppressed)");
+                            break;
+                        }
+
                         // VIIPER backend intercept: when the VIIPER forwarder is active, route
                         // the press through its Guide-button mode (Native → emulated Guide press
                         // held while physically held, GameBar → Win+G). Skip the legacy ViGEm
@@ -4585,6 +4653,73 @@ namespace XboxGamingBarHelper.Labs
             }
 
             Logger.Info($"LegionButtonMonitor: ProcessButtonAction completed for {buttonName}");
+        }
+
+        /// <summary>
+        /// When Steam or a Steam game is active, emit the appropriate Steam shortcut (Shift+Tab for
+        /// in-game overlay, Ctrl+1 for Steam Big Picture menu) and suppress the raw virtual Xbox Guide
+        /// pulse. This prevents Windows from intercepting the Guide button and opening the Xbox Game Bar
+        /// on top of Steam. Returns true if handled.
+        /// </summary>
+        private static bool TryHandleSteamGuideOverlay()
+        {
+            try
+            {
+                var guideMode = Program.SettingsManager?.ViiperGuideButtonMode?.Value;
+                if (string.Equals(guideMode, "GameBar", StringComparison.OrdinalIgnoreCase))
+                {
+                    // User explicitly wants Game Bar mode; do not divert to Steam
+                    return false;
+                }
+
+                // Check for active Steam game or Steam window
+                var runningGameProp = Program.SystemManager?.RunningGame;
+                if (runningGameProp != null)
+                {
+                    var rg = runningGameProp.Value;
+                    if (rg.IsValid() && rg.IsForeground && !string.IsNullOrEmpty(rg.GameId.Path) && rg.GameId.Path.IndexOf("steamapps", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        Logger.Info($"LegionButtonMonitor: Active Steam game '{rg.GameId.Name}' — firing Shift+Tab overlay shortcut");
+                        Program.SendKeyboardShortcut("Shift+Tab");
+                        return true;
+                    }
+                }
+
+                int fgPid = Windows.User32.GetForegroundProcessId();
+                if (fgPid > 0)
+                {
+                    try
+                    {
+                        using (var proc = System.Diagnostics.Process.GetProcessById(fgPid))
+                        {
+                            string procName = proc.ProcessName?.ToLowerInvariant() ?? "";
+                            string procPath = "";
+                            try { procPath = proc.MainModule?.FileName ?? ""; } catch { }
+
+                            if (procPath.IndexOf("steamapps", StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                Logger.Info($"LegionButtonMonitor: Foreground Steam game '{procName}' — firing Shift+Tab overlay shortcut");
+                                Program.SendKeyboardShortcut("Shift+Tab");
+                                return true;
+                            }
+
+                            if (procName == "steam" || procName == "steamwebhelper")
+                            {
+                                Logger.Info("LegionButtonMonitor: Steam UI foreground — firing Ctrl+1 Steam Menu shortcut");
+                                Program.SendKeyboardShortcut("Ctrl+1");
+                                return true;
+                            }
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"TryHandleSteamGuideOverlay threw: {ex.Message}");
+            }
+
+            return false;
         }
 
         public void Dispose()

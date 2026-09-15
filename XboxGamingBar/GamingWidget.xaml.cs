@@ -1739,7 +1739,7 @@ namespace XboxGamingBar
             usbipInstalled = new UsbipInstalledProperty();
             installUsbip = new InstallUsbipProperty(this);
             viiperDeviceType = new ViiperStringComboProperty("xbox360", Shared.Enums.Function.Viiper_DeviceType, ViiperDeviceTypeComboBox, this);
-            viiperInputSource = new ViiperStringComboProperty("XInput", Shared.Enums.Function.Viiper_InputSource, ViiperInputSourceComboBox, this);
+            viiperInputSource = new ViiperStringComboProperty("LegionHid", Shared.Enums.Function.Viiper_InputSource, ViiperInputSourceComboBox, this);
             viiperGyroSource = new ViiperStringComboProperty("Left", Shared.Enums.Function.Viiper_GyroSource, ViiperGyroSourceComboBox, this);
             viiperSteamSubDevice = new ViiperStringComboProperty("steam-deck", Shared.Enums.Function.Viiper_SteamSubDevice, ViiperSteamSubDeviceComboBox, this);
             viiperSonySubDevice = new ViiperStringComboProperty("dualsense-edge", Shared.Enums.Function.Viiper_SonySubDevice, ViiperSonySubDeviceComboBox, this);
@@ -2558,7 +2558,7 @@ namespace XboxGamingBar
                     return;
                 }
                 int mode = legionControllerInputMode?.Value ?? 0;
-                if (mode <= 0 || mode > 3)
+                if (mode <= 0 || mode > 4)
                 {
                     LegionInputModePill.Visibility = Visibility.Collapsed;
                     return;
@@ -2568,6 +2568,7 @@ namespace XboxGamingBar
                 {
                     case 2:  text = "D-Input"; dot = Windows.UI.Color.FromArgb(255, 0x58, 0xA6, 0xFF); bg = Windows.UI.Color.FromArgb(255, 0x1E, 0x2A, 0x3A); break;
                     case 3:  text = "FPS Mode"; dot = Windows.UI.Color.FromArgb(255, 0xF0, 0x88, 0x3E); bg = Windows.UI.Color.FromArgb(255, 0x3A, 0x2A, 0x1E); break;
+                    case 4:  text = "Dual D-Input"; dot = Windows.UI.Color.FromArgb(255, 0x58, 0xA6, 0xFF); bg = Windows.UI.Color.FromArgb(255, 0x1E, 0x2A, 0x3A); break;
                     default: text = "X-Input"; dot = Windows.UI.Color.FromArgb(255, 0x3F, 0xB9, 0x50); bg = Windows.UI.Color.FromArgb(255, 0x1E, 0x3A, 0x2A); break;
                 }
                 LegionInputModePillText.Text = text;
@@ -2597,15 +2598,16 @@ namespace XboxGamingBar
                     }
 
                     int mode = legionGamepadModeSelect?.Value ?? 0;
-                    if (mode == 1 || mode == 2)
+                    if (mode >= 1 && mode <= 3)
                     {
                         if (ControllerInputModeCard != null)
                         {
                             ControllerInputModeCard.Visibility = Visibility.Visible;
                         }
-                        if (LegionGamepadModeComboBox != null && LegionGamepadModeComboBox.SelectedIndex != mode - 1)
+                        int selectIdx = mode == 1 ? 0 : 1;
+                        if (LegionGamepadModeComboBox != null && LegionGamepadModeComboBox.SelectedIndex != selectIdx)
                         {
-                            LegionGamepadModeComboBox.SelectedIndex = mode - 1;
+                            LegionGamepadModeComboBox.SelectedIndex = selectIdx;
                         }
                     }
 
@@ -2652,7 +2654,8 @@ namespace XboxGamingBar
             {
                 { "Command", (int)Shared.Enums.Command.Set },
                 { "Function", (int)fn },
-                { "Content", value }
+                { "Content", value },
+                { "UpdatedTime", DateTime.Now.Ticks }
             };
             App.PipeClient?.SendValueSet(msg);
         }

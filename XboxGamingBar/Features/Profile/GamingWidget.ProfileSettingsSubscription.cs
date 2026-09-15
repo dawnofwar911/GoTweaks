@@ -1,4 +1,4 @@
-﻿using Microsoft.Gaming.XboxGameBar;
+using Microsoft.Gaming.XboxGameBar;
 using Microsoft.Gaming.XboxGameBar.Input;
 using Microsoft.UI.Xaml.Controls;
 using NLog;
@@ -179,11 +179,11 @@ namespace XboxGamingBar
             }
 
             // Don't save during profile loading, switching, initial sync, when helper is updating values,
-            // when any property is syncing from helper pipe, or when Default Game Profile is active
+            // when any property is syncing from helper pipe, or during DGP application/restoration
             if (isLoadingProfile || isSwitchingProfile || isApplyingHelperUpdate || isInitialSync
-                || WidgetSliderProperty.HelperSyncCount > 0 || defaultGameProfileEnabled?.Value == true)
+                || WidgetSliderProperty.HelperSyncCount > 0 || isRestoringFromDefaultProfile || isApplyingDefaultProfile)
             {
-                Logger.Debug($"Skipping auto-save during profile operation (loading={isLoadingProfile}, switching={isSwitchingProfile}, helperUpdate={isApplyingHelperUpdate}, initialSync={isInitialSync}, defaultGameProfile={defaultGameProfileEnabled?.Value})");
+                Logger.Debug($"Skipping auto-save during profile operation (loading={isLoadingProfile}, switching={isSwitchingProfile}, helperUpdate={isApplyingHelperUpdate}, initialSync={isInitialSync}, restoringDGP={isRestoringFromDefaultProfile}, applyingDGP={isApplyingDefaultProfile})");
                 return;
             }
 
@@ -205,7 +205,7 @@ namespace XboxGamingBar
             }
 
             if (isLoadingProfile || isSwitchingProfile || isApplyingHelperUpdate || isInitialSync
-                || WidgetSliderProperty.HelperSyncCount > 0 || defaultGameProfileEnabled?.Value == true)
+                || WidgetSliderProperty.HelperSyncCount > 0 || isRestoringFromDefaultProfile || isApplyingDefaultProfile)
             {
                 return;
             }
@@ -218,7 +218,7 @@ namespace XboxGamingBar
                     settingsSaveDebounceTimer.Stop();
                     // Re-check guards at fire time (state may have changed during the debounce window).
                     if (isLoadingProfile || isSwitchingProfile || isApplyingHelperUpdate || isInitialSync
-                        || WidgetSliderProperty.HelperSyncCount > 0 || defaultGameProfileEnabled?.Value == true)
+                        || WidgetSliderProperty.HelperSyncCount > 0 || isRestoringFromDefaultProfile || isApplyingDefaultProfile)
                     {
                         return;
                     }
