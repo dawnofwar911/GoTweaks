@@ -1,4 +1,4 @@
-﻿using NLog;
+using NLog;
 using Shared.Data;
 using Shared.Enums;
 using System;
@@ -856,6 +856,8 @@ namespace XboxGamingBarHelper.Devices.Libraries.Legion
                                 // frames don't apply on this device.
                                 Labs.LegionButtonMonitor.GoSAutoSleepWriter =
                                     (min) => goSController?.SetAutoSleepTime(min) ?? false;
+                                Labs.LegionButtonMonitor.GoSGamepadModeWriter =
+                                    (mode) => goSController?.SetGamepadMode(mode == 1) ?? false;
                             }
                             else
                             {

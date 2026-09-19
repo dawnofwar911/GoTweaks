@@ -279,14 +279,31 @@ namespace XboxGamingBarHelper.Labs
             return ok;
         }
 
+        public static Func<int, bool> GoSGamepadModeWriter;
+
         /// <summary>Switches the gamepad protocol (1=xinput 2=dinput 3=dual-dinput).
         /// Writes to 0x00 (receiver / global), 0x03 (left), and 0x04 (right). In detached mode,
         /// writing to 0x00 is required for the USB receiver to switch modes, while 0x03 and 0x04
         /// configure the wireless controller halves.</summary>
         public bool ApplyGamepadMode(int mode)
         {
+            if (IsGoSControllerDevice())
+            {
+                var writer = GoSGamepadModeWriter;
+                if (writer != null)
+                {
+                    bool okGoS = false;
+                    try { okGoS = writer(mode); }
+                    catch (Exception ex) { Logger.Warn($"ApplyGamepadMode (Go S) threw: {ex.Message}"); }
+                    Logger.Info($"LegionButtonMonitor.ApplyGamepadMode (Go S path) mode={mode} => {okGoS}");
+                    return okGoS;
+                }
+                Logger.Info("ApplyGamepadMode: Go S detected but no Go S gamepad mode writer available");
+                return false;
+            }
+
             var handle = hidHandle;
-            if (handle == null || handle.IsInvalid || !_hasWriteAccess || IsGoSControllerDevice()) return false;
+            if (handle == null || handle.IsInvalid || !_hasWriteAccess) return false;
             if (mode != 1 && mode != 2 && mode != 3) return false;
 
             string modeDesc = mode == 1 ? "xinput" : (mode == 2 ? "dinput" : "dual-dinput");
@@ -688,6 +705,22 @@ namespace XboxGamingBarHelper.Labs
             {
                 sample = _latestGamepadSample;
                 return _hasGamepadSample;
+            }
+        }
+
+        /// <summary>
+        /// Clears all cached gamepad, gyro, and touchpad samples.
+        /// Called on controller disconnect or sleep to avoid stale held inputs.
+        /// </summary>
+        public static void ClearCachedSamples()
+        {
+            lock (_gyroSampleLock)
+            {
+                _hasGamepadSample = false;
+                _hasLeftGyroSample = false;
+                _hasRightGyroSample = false;
+                _hasRightTouchpadSample = false;
+                _latestGamepadSample = default;
             }
         }
 

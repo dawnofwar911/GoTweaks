@@ -522,6 +522,18 @@ namespace XboxGamingBarHelper.Devices.Libraries.Legion
                         Logger.Warn($"Failed to sync connection status from button monitor: {ex.Message}");
                     }
 
+                    if (!leftConnected && !rightConnected)
+                    {
+                        // Both controller halves disconnected or went to sleep. Clear cached HID
+                        // samples so no stuck stick tilt or button press is held in memory.
+                        Labs.LegionButtonMonitor.ClearCachedSamples();
+                    }
+
+                    // Detached controllers may have gone to sleep, disconnected, or reconnected wirelessly.
+                    // Notify so VIIPER input forwarding and virtual device state reconcile immediately
+                    // (re-evaluates AnyControllerDetached / input source and clears stuck inputs on sleep).
+                    Program.NotifyDockStateChanged();
+
                     if (anyHalfReconnected)
                     {
                         // A write sent while the half was offline never reached its
@@ -556,14 +568,14 @@ namespace XboxGamingBarHelper.Devices.Libraries.Legion
                     bool wasEmpty = string.IsNullOrEmpty(ControllerVidPid.Value);
                     bool changed = vidPid != ControllerVidPid.Value;
 
+                    // Always try to sync (the property will handle deduplication)
+                    ControllerVidPid.SetValueAndSync(vidPid);
+
                     if (changed || wasEmpty)
                     {
                         Logger.Info($"Controller VID:PID set to {vidPid}");
                         Program.NotifyDockStateChanged();
                     }
-
-                    // Always try to sync (the property will handle deduplication)
-                    ControllerVidPid.SetValueAndSync(vidPid);
                 }
             }
             catch (Exception ex)

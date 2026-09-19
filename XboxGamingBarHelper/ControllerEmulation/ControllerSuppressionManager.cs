@@ -186,11 +186,6 @@ namespace XboxGamingBarHelper.ControllerEmulation
                     .Where(id => id.IndexOf("&MI_00", StringComparison.OrdinalIgnoreCase) >= 0)
                     .ToList();
 
-                if (!targets.Any(t => t.IndexOf("61EB&MI_00", StringComparison.OrdinalIgnoreCase) >= 0))
-                {
-                    targets.Add("USB\\VID_17EF&PID_61EB&MI_00\\7&194b9d2e&1&0000");
-                }
-
                 foreach (string id in targets)
                 {
                     bool launched = RunPnpUtil($"/enable-device \"{id}\"", out int exitCode, out string stdErr);
@@ -1880,9 +1875,44 @@ namespace XboxGamingBarHelper.ControllerEmulation
             return results;
         }
 
+        private static IEnumerable<string> QueryRegistryUsbDeviceIds(int vendorId, params int[] productIds)
+        {
+            var results = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                using var baseKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\USB");
+                if (baseKey != null)
+                {
+                    var vidPidPrefixes = productIds.Select(pid => $"VID_{vendorId:X4}&PID_{pid:X4}").ToList();
+                    foreach (var subKeyName in baseKey.GetSubKeyNames())
+                    {
+                        foreach (var prefix in vidPidPrefixes)
+                        {
+                            if (subKeyName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                            {
+                                using var devKey = baseKey.OpenSubKey(subKeyName);
+                                if (devKey != null)
+                                {
+                                    foreach (var instanceName in devKey.GetSubKeyNames())
+                                    {
+                                        results.Add($@"USB\{subKeyName}\{instanceName}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug($"Registry USB query failed for VID_{vendorId:X4}: {ex.Message}");
+            }
+            return results;
+        }
+
         private static IEnumerable<string> QueryUsbDeviceIds(int vendorId, params int[] productIds)
         {
-            HashSet<string> results = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> results = new HashSet<string>(QueryRegistryUsbDeviceIds(vendorId, productIds), StringComparer.OrdinalIgnoreCase);
             foreach (int pid in productIds)
             {
                 string query = $"SELECT PNPDeviceID FROM Win32_PnPEntity WHERE PNPDeviceID LIKE 'USB\\\\VID_{vendorId:X4}&PID_{pid:X4}%'";

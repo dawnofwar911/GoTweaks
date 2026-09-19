@@ -18,7 +18,8 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
         private new static readonly Logger Logger = LogManager.GetCurrentClassLogger();
 
         private const uint DefaultBusId = 1;
-        private const string DefaultDeviceType = "dualsenseedge";
+        private const string DefaultDeviceType = "xbox360";
+        private const string DefaultGuideDeviceType = "xbox360";
 
         private readonly SettingsManager settingsManager;
         private readonly ControllerEmulationManager legacyManager;
@@ -299,7 +300,13 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
 
                 if (backendOn && (emulationEnabled || detachedXInputBridge))
                 {
-                    if (guideOnlyMode && activeDeviceId != 0 && activeDeviceType == "xbox360")
+                    string desiredTarget = "xbox360";
+                    if (emulationEnabled)
+                    {
+                        ResolveDeviceTargets(out desiredTarget, out _, out _);
+                    }
+
+                    if (guideOnlyMode && activeDeviceId != 0 && activeDeviceType == "xbox360" && desiredTarget == "xbox360")
                     {
                         PromoteGuideOnlyToLiveBridge(detachedXInputBridge);
                         return;
@@ -405,6 +412,7 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
         {
             try
             {
+                forwarder?.ClearInputState();
                 if (isRunning)
                 {
                     forwarder.SetInputSource(ResolveInputSource());
@@ -525,6 +533,18 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
             if (inst == null) return;
             try { inst.forwarder?.SetDesktopControlsActive(active); }
             catch (Exception ex) { Logger.Warn($"SetDesktopControlsActive threw: {ex.Message}"); }
+        }
+
+        /// <summary>
+        /// Clears any latched inputs and emits a neutral frame on the virtual controller.
+        /// Useful when controllers disconnect, sleep, or change dock states.
+        /// </summary>
+        public static void ResetVirtualInputState()
+        {
+            var inst = activeInstance;
+            if (inst == null) return;
+            try { inst.forwarder?.ClearInputState(); }
+            catch (Exception ex) { Logger.Warn($"ResetVirtualInputState threw: {ex.Message}"); }
         }
 
         /// <summary>
@@ -657,7 +677,7 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
             // leaving the guide route dead after an emu on->off cycle (field report 2026-07-23).
             UsbipCli.NoteServerStarted();
 
-            var addResult = service.AddDevice(activeBusId, DefaultDeviceType, 0, 0);
+            var addResult = service.AddDevice(activeBusId, DefaultGuideDeviceType, 0, 0);
             if (!addResult.Success)
             {
                 Logger.Warn("VIIPER guide-only: failed to add xbox360 device; tearing down.");
@@ -666,7 +686,7 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
                 return;
             }
             activeDeviceId = addResult.DeviceId;
-            activeDeviceType = DefaultDeviceType;
+            activeDeviceType = DefaultGuideDeviceType;
             guideOnlyMode = true;
 
             // Seed an idle frame so Windows sees the device as connected/centered before
@@ -686,7 +706,7 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
                 DetectGuideOnlyLegionSlot();
             });
 
-            Logger.Info($"VIIPER guide-only emulation started (bus={activeBusId}, dev={activeDeviceId}, type={DefaultDeviceType})");
+            Logger.Info($"VIIPER guide-only emulation started (bus={activeBusId}, dev={activeDeviceId}, type={DefaultGuideDeviceType})");
 
             // Pad came up — Labs no longer needs its dedicated ViGEm Guide pad.
             Program.NotifyGuideRouteChanged();
@@ -1097,7 +1117,29 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
             }
 
             var value = settingsManager?.ViiperInputSource?.Value;
-            // On Legion hardware, prefer LegionHid (raw USB HID).
+
+            if (string.Equals(value, "LegionHid", StringComparison.OrdinalIgnoreCase))
+            {
+                return ViiperInputSourceKind.LegionHid;
+            }
+
+            if (string.Equals(value, "XInput", StringComparison.OrdinalIgnoreCase))
+            {
+                // XInput requested — but with "Disable OS Reporting" on, the firmware register
+                // 04/0f is in vendor-exclusive mode and the physical pad emits NO XInput, so
+                // this source would read nothing and the emulated pad would sit neutral
+                // ("emulation broken"). The vendor report stream still flows, so fall back to
+                // LegionHid for the session on Legion hardware.
+                if (legionManager?.LegionOsReportingDisabled?.Value == true
+                    && legionManager?.LegionGoDetected?.Value == true)
+                {
+                    Logger.Warn("VIIPER input source XInput is unavailable while OS reporting is disabled (04/0f vendor-exclusive) — using Legion Go HID for this session");
+                    return ViiperInputSourceKind.LegionHid;
+                }
+                return ViiperInputSourceKind.XInput;
+            }
+
+            // Default on Legion hardware: prefer LegionHid (raw USB HID).
             // Windows blocks background apps from polling XInput when Xbox Game Bar or
             // system overlays are focused, freezing the emulated controller. LegionHid reads
             // directly from USB HID at 500Hz without Windows XInput blocking, ensuring
@@ -1107,21 +1149,6 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
                 return ViiperInputSourceKind.LegionHid;
             }
 
-            if (string.Equals(value, "LegionHid", StringComparison.OrdinalIgnoreCase))
-            {
-                return ViiperInputSourceKind.LegionHid;
-            }
-            // XInput requested — but with "Disable OS Reporting" on, the firmware register
-            // 04/0f is in vendor-exclusive mode and the physical pad emits NO XInput, so
-            // this source would read nothing and the emulated pad would sit neutral
-            // ("emulation broken"). The vendor report stream still flows, so fall back to
-            // LegionHid for the session on Legion hardware.
-            if (legionManager?.LegionOsReportingDisabled?.Value == true
-                && legionManager?.LegionGoDetected?.Value == true)
-            {
-                Logger.Warn("VIIPER input source XInput is unavailable while OS reporting is disabled (04/0f vendor-exclusive) — using Legion Go HID for this session");
-                return ViiperInputSourceKind.LegionHid;
-            }
             return ViiperInputSourceKind.XInput;
         }
 

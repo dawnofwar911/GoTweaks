@@ -11,7 +11,7 @@ namespace XboxGamingBarHelper.Settings
     /// </summary>
     internal class ViiperDeviceTypeProperty : HelperProperty<string, SettingsManager>
     {
-        public const string Default = "dualsenseedge";
+        public const string Default = "xbox360";
         private const string SettingsKey = "ViiperDeviceType";
 
         public ViiperDeviceTypeProperty(SettingsManager inManager)

@@ -1756,10 +1756,37 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
                     }
                     if (desktopControlsActive)
                     {
+                        // Check Guide button edge even during Desktop Controls so Game Bar / Guide shortcut works
+                        bool guidePressed = false;
+                        if (inputSource == ViiperInputSourceKind.LegionHid)
+                        {
+                            if (LegionButtonMonitor.TryGetLatestGamepadSample(out var sample))
+                            {
+                                ushort aux = TranslateMonitorAuxToLegionAux(sample.AuxButtons);
+                                bool desktopIsGuide = _desktopFrontTarget == FrontButtonTarget.Guide;
+                                guidePressed = ((sample.Buttons & ViiperXInput.Guide) != 0)
+                                             || (desktopIsGuide && (aux & LegionAux.Mode) != 0);
+                            }
+                        }
+                        else
+                        {
+                            var desktopXiState = default(ViiperXInputState);
+                            if (ViiperXInput.GetState(physicalIndex, ref desktopXiState) == ViiperXInput.ErrorSuccess)
+                            {
+                                guidePressed = (desktopXiState.Gamepad.Buttons & ViiperXInput.Guide) != 0;
+                            }
+                        }
+                        ApplyGuideModeEdge(guidePressed);
+
                         // Keep the pad alive but neutral while Desktop Controls owns the
                         // physical inputs. default(ViiperXInputGamepad) is fully centered /
                         // no buttons; BuildDeviceInput renders it correctly for every target.
-                        byte[] neutral = BuildDeviceInput(default(ViiperXInputGamepad));
+                        var neutralGamepad = default(ViiperXInputGamepad);
+                        if (guideMode != ViiperGuideButtonMode.GameBar && (guidePressed || IsGuideHoldActive()))
+                        {
+                            neutralGamepad.Buttons |= ViiperXInput.Guide;
+                        }
+                        byte[] neutral = BuildDeviceInput(neutralGamepad);
                         if (neutral != null && neutral.Length > 0) EmitDeviceFrame(neutral);
                         Thread.Sleep(16);
                         continue;
