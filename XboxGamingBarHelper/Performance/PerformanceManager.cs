@@ -377,6 +377,7 @@ namespace XboxGamingBarHelper.Performance
         private TdpMethodAvailableProperty pawnIOAvailableProperty;
         private TdpMethodAvailableProperty pawnIOInstalledProperty;
         private InstallPawnIOProperty installPawnIOProperty;
+        private static bool _pawnIoLegionWarned;
 
         /// <summary>
         /// Gets whether PawnIO is available for TDP control.
@@ -1409,6 +1410,7 @@ namespace XboxGamingBarHelper.Performance
                 switch (tdpMethod)
                 {
                     case TdpMethod.ManufacturerWMI:
+                        _pawnIoLegionWarned = false;
                         if (legionDetected && legionManager != null)
                         {
                             // Note: SetCustomTDP will automatically switch to Custom mode (255) if needed
@@ -1424,8 +1426,9 @@ namespace XboxGamingBarHelper.Performance
                     case TdpMethod.PawnIO:
                         if (pawnIOAvailable && ryzenSmuService != null && ryzenSmuService.IsInitialized)
                         {
-                            if (legionDetected)
+                            if (legionDetected && !_pawnIoLegionWarned)
                             {
+                                _pawnIoLegionWarned = true;
                                 // #94 (Marctraider): SMU writes on Legion devices get
                                 // re-asserted by the embedded controller within seconds —
                                 // his log shows SetAllLimits(35W) "succeeding" while the

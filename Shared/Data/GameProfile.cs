@@ -1,4 +1,4 @@
-﻿using NLog;
+using NLog;
 using Shared.Utilities;
 using System;
 using System.Collections.Concurrent;
@@ -42,7 +42,10 @@ namespace Shared.Data
             {
                 if (IsGlobalProfile)
                 {
-                    Logger.Warn("Can't change \"Use\" property of global profile.");
+                    if (value)
+                    {
+                        Logger.Warn("Can't change \"Use\" property of global profile.");
+                    }
                     return;
                 }
 

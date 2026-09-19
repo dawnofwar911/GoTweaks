@@ -100,7 +100,7 @@ namespace XboxGamingBarHelper.Devices.Libraries.Legion
                 var result = controllerService.ReadDeviceStatus();
                 if (result == null)
                 {
-                    Logger.Info("PollDeviceStatus: no b0:01 response (timeout or monitor inactive)");
+                    Logger.Debug("PollDeviceStatus: no b0:01 response (timeout or monitor inactive)");
                 }
             }
             catch (Exception ex)
