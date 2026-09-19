@@ -1489,16 +1489,20 @@ namespace XboxGamingBarHelper.LosslessScaling
             {
                 if (isInternalSettingsWrite)
                     return;
-            }
 
-            // Debounce multiple rapid file events (500ms)
-            if (settingsWatcherDebounceTimer == null)
-            {
-                settingsWatcherDebounceTimer = new System.Threading.Timer(OnSettingsDebounceFired, null, 500, System.Threading.Timeout.Infinite);
-            }
-            else
-            {
-                settingsWatcherDebounceTimer.Change(500, System.Threading.Timeout.Infinite);
+                // Debounce multiple rapid file events (500ms)
+                if (settingsWatcherDebounceTimer == null)
+                {
+                    settingsWatcherDebounceTimer = new System.Threading.Timer(OnSettingsDebounceFired, null, 500, System.Threading.Timeout.Infinite);
+                }
+                else
+                {
+                    try
+                    {
+                        settingsWatcherDebounceTimer.Change(500, System.Threading.Timeout.Infinite);
+                    }
+                    catch (ObjectDisposedException) { }
+                }
             }
         }
 
@@ -1540,10 +1544,13 @@ namespace XboxGamingBarHelper.LosslessScaling
                     settingsWatcher.Dispose();
                     settingsWatcher = null;
                 }
-                if (settingsWatcherDebounceTimer != null)
+                lock (stateLock)
                 {
-                    settingsWatcherDebounceTimer.Dispose();
-                    settingsWatcherDebounceTimer = null;
+                    if (settingsWatcherDebounceTimer != null)
+                    {
+                        settingsWatcherDebounceTimer.Dispose();
+                        settingsWatcherDebounceTimer = null;
+                    }
                 }
             }
             base.Dispose(disposing);

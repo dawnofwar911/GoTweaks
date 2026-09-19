@@ -31,8 +31,11 @@ namespace XboxGamingBarHelper.Devices.Libraries.Legion
             {
                 if (controllerService != null && isControllerConnected)
                 {
+                    controllerService.BatteryUpdated -= OnControllerBatteryUpdated;
                     controllerService.BatteryUpdated += OnControllerBatteryUpdated;
+                    controllerService.DeviceStatusUpdated -= OnControllerDeviceStatusUpdated;
                     controllerService.DeviceStatusUpdated += OnControllerDeviceStatusUpdated;
+                    controllerService.StickLightDriftDetected -= OnStickLightDriftDetected;
                     controllerService.StickLightDriftDetected += OnStickLightDriftDetected;
                     controllerService.StartBatteryMonitoring();
                     StartDeviceStatusPolling();

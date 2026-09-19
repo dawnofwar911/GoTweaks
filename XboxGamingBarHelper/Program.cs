@@ -100,6 +100,7 @@ namespace XboxGamingBarHelper
         private const uint WM_QUIT = 0x0012;
         private static readonly IntPtr SC_MONITORPOWER = new IntPtr(0xF170);
         private static readonly IntPtr MONITOR_OFF = new IntPtr(2);
+        private static readonly IntPtr MONITOR_ON = new IntPtr(-1);
 
         // Managers
         private static PerformanceManager performanceManager;

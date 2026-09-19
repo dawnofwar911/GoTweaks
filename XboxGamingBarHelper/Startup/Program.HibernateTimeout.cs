@@ -1,4 +1,4 @@
-﻿using NLog;
+using NLog;
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
@@ -33,7 +33,7 @@ namespace XboxGamingBarHelper
         private static System.Threading.Timer hibernateTimeoutTimer;
         private const int HibernateTimeoutCheckIntervalMs = 5000; // Same cadence as Screen Saver
         private static volatile bool hibernateTimeoutTriggered = false;
-        private static uint _resumeBaselineTickCount = 0;
+        private static uint _resumeBaselineTickCount = (uint)Environment.TickCount;
 
         #region XInput (gamepad activity)
 
@@ -99,25 +99,53 @@ namespace XboxGamingBarHelper
         }
 
         /// <summary>
-        /// Time since the last detected XInput packet-number change, across all 4
-        /// slots. Returns a huge value (never blocks hibernation via this signal) when
-        /// XInput isn't available at all.
+        /// Time since the last detected XInput or Legion controller activity, across all 4
+        /// slots and hardware HID. Returns a huge value (never blocks hibernation via this signal) when
+        /// no controller is active.
         /// </summary>
         private static uint GetGamepadIdleMs(uint nowTick)
         {
-            if (hibernateXInputGetState == null) return uint.MaxValue;
+            if (!hibernateXInputResolved)
+            {
+                ResolveHibernateXInput();
+            }
 
             bool anyChanged = false;
-            for (uint i = 0; i < 4; i++)
+            if (hibernateXInputGetState != null)
             {
-                var state = new XINPUT_STATE_HT();
-                uint result = hibernateXInputGetState(i, ref state);
-                if (result == 0 && state.dwPacketNumber != hibernateLastXInputPacket[i])
+                for (uint i = 0; i < 4; i++)
                 {
-                    hibernateLastXInputPacket[i] = state.dwPacketNumber;
-                    anyChanged = true;
+                    var state = new XINPUT_STATE_HT();
+                    uint result = hibernateXInputGetState(i, ref state);
+                    if (result == 0 && state.dwPacketNumber != hibernateLastXInputPacket[i])
+                    {
+                        hibernateLastXInputPacket[i] = state.dwPacketNumber;
+                        anyChanged = true;
+                    }
                 }
             }
+
+            // Also check Legion hardware controller samples (covers DirectInput & DualSense emulation where XInput packet numbers do not advance)
+            try
+            {
+                if (Labs.LegionButtonMonitor.TryGetLatestGamepadSample(out var sample))
+                {
+                    bool hasActiveInput = sample.Buttons != 0
+                        || sample.AuxButtons != 0
+                        || sample.LeftTrigger > 30
+                        || sample.RightTrigger > 30
+                        || Math.Abs(sample.LeftStickX) > 4000
+                        || Math.Abs(sample.LeftStickY) > 4000
+                        || Math.Abs(sample.RightStickX) > 4000
+                        || Math.Abs(sample.RightStickY) > 4000;
+
+                    if (hasActiveInput)
+                    {
+                        anyChanged = true;
+                    }
+                }
+            }
+            catch { }
 
             if (anyChanged || !hibernateXInputSeeded)
             {
@@ -180,6 +208,7 @@ namespace XboxGamingBarHelper
         internal static void ResetHibernateTimeoutAfterResume()
         {
             hibernateTimeoutTriggered = false;
+            screenSaverTriggered = false;
             _resumeBaselineTickCount = (uint)Environment.TickCount;
         }
 

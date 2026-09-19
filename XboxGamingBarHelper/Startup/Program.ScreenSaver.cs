@@ -46,6 +46,11 @@ namespace XboxGamingBarHelper
             {
                 if (screenSaverTimer == null)
                 {
+                    ResolveHibernateXInput();
+                    if (_resumeBaselineTickCount == 0)
+                    {
+                        _resumeBaselineTickCount = (uint)Environment.TickCount;
+                    }
                     screenSaverTimer = new System.Threading.Timer(ScreenSaverIdleCheck, null, ScreenSaverCheckIntervalMs, ScreenSaverCheckIntervalMs);
                     Logger.Info("Screen Saver: Started idle monitoring timer");
                 }
@@ -56,6 +61,7 @@ namespace XboxGamingBarHelper
                 {
                     screenSaverTimer.Dispose();
                     screenSaverTimer = null;
+                    screenSaverTriggered = false;
                     Logger.Info("Screen Saver: Stopped idle monitoring timer");
                 }
             }
@@ -67,12 +73,27 @@ namespace XboxGamingBarHelper
 
             try
             {
+                // Never turn off screen while a game is actively in foreground
+                if (systemManager?.RunningGame?.Value.IsValid() == true && systemManager.RunningGame.Value.IsForeground)
+                {
+                    return;
+                }
+
                 var lastInput = new LASTINPUTINFO();
                 lastInput.cbSize = (uint)Marshal.SizeOf(lastInput);
 
                 if (GetLastInputInfo(ref lastInput))
                 {
-                    uint idleMs = (uint)Environment.TickCount - lastInput.dwTime;
+                    uint nowTick = (uint)Environment.TickCount;
+                    uint kbmIdleMs = nowTick - lastInput.dwTime;
+                    uint gamepadIdleMs = GetGamepadIdleMs(nowTick);
+                    uint idleMs = Math.Min(kbmIdleMs, gamepadIdleMs);
+
+                    // Clamp to time-since-last-resume so a stale pre-sleep timestamp can't
+                    // immediately blank the screen right after wake.
+                    uint sinceResumeMs = nowTick - _resumeBaselineTickCount;
+                    idleMs = Math.Min(idleMs, sinceResumeMs);
+
                     if (idleMs >= ScreenSaverIdleTimeoutMs)
                     {
                         if (!screenSaverTriggered)
@@ -84,9 +105,10 @@ namespace XboxGamingBarHelper
                     }
                     else if (screenSaverTriggered)
                     {
-                        // User moved mouse/pressed key — re-arm for next idle period
+                        // User moved mouse/pressed key/gamepad — wake display and re-arm for next idle period
                         screenSaverTriggered = false;
                         Logger.Info("Screen Saver: Input detected, re-armed");
+                        SendMessage(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, MONITOR_ON);
                     }
                 }
             }
