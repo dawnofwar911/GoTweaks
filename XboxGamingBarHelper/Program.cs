@@ -1348,7 +1348,7 @@ namespace XboxGamingBarHelper
             // One-time cleanup for the power-plan features retired in #103: restore the
             // user's original Max/Min processor state if an older build modified it, and
             // reset leftover core-parking powercfg values. No-op once the markers clear.
-            Task.Run(() => Services.SystemRestoreService.RestoreRetiredSettings(systemManager));
+            _ = Task.Run(() => Services.SystemRestoreService.RestoreRetiredSettings(systemManager));
 
             wave2Timer.Stop();
             Logger.Info($"[TIMING] Wave 2 (parallel): {wave2Timer.ElapsedMilliseconds}ms");
