@@ -740,6 +740,14 @@ namespace XboxGamingBarHelper
                                 else if (targetObj is long tLong && tLong > 0) targetTdp = (int)tLong;
                                 else if (targetObj is string tStr && int.TryParse(tStr, out int parsedTdp) && parsedTdp > 0) targetTdp = parsedTdp;
                             }
+
+                            if (performanceManager.CurrentSPL == targetTdp && performanceManager.CurrentSPL > 0)
+                            {
+                                Logger.Debug($"Pipe: ReapplyTDP skipped — hardware already confirmed at {targetTdp}W");
+                                SendPipeAck(pipeMsg.RequestId);
+                                return;
+                            }
+
                             Logger.Info($"Pipe: ReapplyTDP request — re-pushing {targetTdp}W to hardware");
                             performanceManager.SetTDP(targetTdp);
                         }

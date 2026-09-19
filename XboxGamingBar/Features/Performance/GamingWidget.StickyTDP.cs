@@ -281,9 +281,8 @@ namespace XboxGamingBar
                     }
                     else
                     {
-                        // Periodic Hardware Lock: hardware matches target, enforce periodic re-assertion to prevent silent EC overrides
-                        Logger.Debug($"Sticky TDP: Hardware limit ({currentHardwareLimit}W) matches target ({targetTDPLimit}W). Re-asserting periodic hardware lock.");
-                        await ReapplyStickyTDPAsync("periodic watchdog lock");
+                        // Hardware matches target, in lock - no drift detected
+                        Logger.Debug($"Sticky TDP: Hardware limit ({currentHardwareLimit}W) matches target ({targetTDPLimit}W). In lock.");
                     }
                 }
                 else
