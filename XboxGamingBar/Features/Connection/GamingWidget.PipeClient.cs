@@ -100,10 +100,7 @@ namespace XboxGamingBar
                     // native Game Bar hotkey path, which already dispatches before calling
                     // FocusThisWidgetAsync). XboxGameBarWidgetControl.ActivateAsync needs the UI
                     // thread like any other widget-context call - dispatch explicitly here.
-                    if (Dispatcher != null)
-                    {
-                        _ = Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () => { _ = FocusThisWidgetAsync(); });
-                    }
+                    TryRunOnDispatcher(() => { _ = FocusThisWidgetAsync(); }, "PipeClient_MessageReceived/focus");
                     return;
                 }
 
@@ -112,14 +109,11 @@ namespace XboxGamingBar
                     Convert.ToInt32(thFuncObj) == (int)Shared.Enums.Function.TileHotkeyFired)
                 {
                     // Runs on the pipe read thread; SimulateTileHotkeyFired touches XAML, so
-                    // dispatch to the UI thread (guard Dispatcher like the FocusWidget branch
-                    // above - it can be null if the widget is being torn down).
-                    if (Dispatcher != null &&
-                        message.TryGetValue("Content", out object thContent) && thContent is string tileId
+                    // dispatch to the UI thread.
+                    if (message.TryGetValue("Content", out object thContent) && thContent is string tileId
                         && !string.IsNullOrEmpty(tileId))
                     {
-                        _ = Dispatcher.RunAsync(Windows.UI.Core.CoreDispatcherPriority.Normal,
-                            () => SimulateTileHotkeyFired(tileId));
+                        TryRunOnDispatcher(() => SimulateTileHotkeyFired(tileId), "PipeClient_MessageReceived/tileHotkey");
                     }
                     return;
                 }
@@ -213,13 +207,7 @@ namespace XboxGamingBar
                 // RPC_E_WRONG_THREAD when invoked off the UI apartment (seen consistently in
                 // live logs around TDP / LightBrightness debounce-cancel paths). Dispatching
                 // here keeps the whole property tree on the UI thread.
-                if (Dispatcher == null)
-                {
-                    // Fallback: no dispatcher available (widget torn down); skip.
-                    return;
-                }
-
-                await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
+                TryRunOnDispatcher(() =>
                 {
                     isApplyingHelperUpdate = true;
                     try
@@ -230,7 +218,7 @@ namespace XboxGamingBar
                     {
                         isApplyingHelperUpdate = false;
                     }
-                });
+                }, "PipeClient_MessageReceived/properties");
             }
             catch (Exception ex)
             {

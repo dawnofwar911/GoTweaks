@@ -94,10 +94,10 @@ namespace XboxGamingBar
                 if (!shownInitialSetupBanner && (DateTime.Now - startTime).TotalSeconds >= 8)
                 {
                     shownInitialSetupBanner = true;
-                    await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
+                    TryRunOnDispatcher(() =>
                     {
                         ShowConnectionBanner(BannerState.InitialSetup);
-                    });
+                    }, "ConnectPipeWithRetryAsync/initialSetup");
                 }
 
                 bool connected = await App.ConnectPipeAsync(timeoutMs);
@@ -127,14 +127,14 @@ namespace XboxGamingBar
             Logger.Warn($"Failed to connect via pipe after {maxAttempts} attempts ({(DateTime.Now - startTime).TotalSeconds:F1}s)");
 
             // Show disconnected banner so user knows connection failed
-            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
+            TryRunOnDispatcher(() =>
             {
                 ShowConnectionBanner(BannerState.Disconnected);
                 // Kick on the heartbeat watcher so we auto-reconnect if the helper
                 // appears later (e.g. long UAC prompt during update-debug completes
                 // just after we gave up).
                 StartHeartbeatWatcher();
-            });
+            }, "ConnectPipeWithRetryAsync/disconnected");
         }
 
         /// <summary>
