@@ -1,4 +1,4 @@
-﻿using NLog;
+using NLog;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -85,7 +85,12 @@ namespace XboxGamingBarHelper.Windows
         private static extern bool IsIconic(IntPtr hWnd);
 
         [DllImport("user32.dll")]
-        private static extern bool SetForegroundWindow(IntPtr hWnd);
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool AllowSetForegroundWindow(int dwProcessId);
+
+        public const int ASFW_ANY = -1;
 
         private const int SW_SHOW = 5;
         private const int SW_MINIMIZE = 6;

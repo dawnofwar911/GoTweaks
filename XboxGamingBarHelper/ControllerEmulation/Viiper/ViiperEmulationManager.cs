@@ -592,6 +592,7 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
 
             if (pressed)
             {
+                try { Windows.User32.AllowSetForegroundWindow(Windows.User32.ASFW_ANY); } catch { }
                 inst._guideOnlyPressTicks = DateTime.UtcNow.Ticks;
                 return inst.SubmitGuideOnlyFrame(true);
             }

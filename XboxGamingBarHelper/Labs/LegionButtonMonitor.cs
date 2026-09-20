@@ -4736,12 +4736,7 @@ namespace XboxGamingBarHelper.Labs
                                 return true;
                             }
 
-                            if (procName == "steam" || procName == "steamwebhelper")
-                            {
-                                Logger.Info("LegionButtonMonitor: Steam UI foreground — firing Ctrl+Alt+1 Steam Menu shortcut");
-                                Program.SendKeyboardShortcut("Ctrl+Alt+1");
-                                return true;
-                            }
+
                         }
                     }
                     catch { }
