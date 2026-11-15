@@ -31,8 +31,21 @@ namespace XboxGamingBarHelper.RTSS.OSDItems
             // Always show battery info when enabled (inverted % - green when full, red when low)
             osdItems.Add(new OSDItemValue(batteryPercentSensor.Value, "%", OSDValueType.PercentageInv));
 
-            bool isDischarging = batteryDischargeRateSensor.Value > 0;
-            bool isCharging = batteryChargeRateSensor.Value > 0;
+            bool isDischarging = false;
+            try
+            {
+                var battStatus = PowerManager.BatteryStatus;
+                var powerSupply = PowerManager.PowerSupplyStatus;
+                isDischarging = battStatus == BatteryStatus.Discharging || 
+                                powerSupply == PowerSupplyStatus.NotPresent || 
+                                batteryDischargeRateSensor.Value > 0;
+            }
+            catch
+            {
+                isDischarging = batteryDischargeRateSensor.Value > 0;
+            }
+
+            bool isCharging = !isDischarging && batteryChargeRateSensor.Value > 0;
 
             if (isDischarging)
             {

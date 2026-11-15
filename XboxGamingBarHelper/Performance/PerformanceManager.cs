@@ -1164,6 +1164,31 @@ namespace XboxGamingBarHelper.Performance
                 BatteryRemainingTime.Value = calculatedTimeRemaining;
             }
 
+            // Synchronize battery charge/discharge rate with Windows PowerManager
+            try
+            {
+                var battStatus = PowerManager.BatteryStatus;
+                var powerSupply = PowerManager.PowerSupplyStatus;
+                bool isDischarging = battStatus == BatteryStatus.Discharging || 
+                                     powerSupply == PowerSupplyStatus.NotPresent || 
+                                     BatteryDischargeRate.Value > 0;
+
+                if (isDischarging)
+                {
+                    // Device is on battery / discharging - charge rate is strictly 0
+                    BatteryChargeRate.Value = 0f;
+                }
+                else if (battStatus == BatteryStatus.Charging)
+                {
+                    // Actively charging - discharge rate is strictly 0
+                    BatteryDischargeRate.Value = 0f;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug($"Error synchronizing battery power state: {ex.Message}");
+            }
+
             // Piggy-back the widget metrics push on this tick. Previously a separate
             // 1Hz Timer fired ~halfway between Update() calls and read the same fields;
             // bundling here gives the widget the freshest values and removes a thread.
@@ -1306,11 +1331,14 @@ namespace XboxGamingBarHelper.Performance
                         bool newIsValid = newValue >= 0;
                         bool newIsNonZero = newValue > 0;
 
+                        // Battery charge/discharge sensors MUST allow 0W so unplugging/plugging is reflected
+                        bool isBatteryRateSensor = hardwareSensor is BatteryChargeRateSensor || hardwareSensor is BatteryDischargeRateSensor;
+
                         // Update if:
                         // 1. Current value is invalid (-1), OR
-                        // 2. New value is non-zero (prefer actual readings over 0)
-                        // Don't overwrite a non-zero valid value with zero
-                        if (!currentIsValid || newIsNonZero || (!currentIsNonZero && newIsValid))
+                        // 2. New value is non-zero (prefer actual readings over 0), OR
+                        // 3. Sensor is battery rate where 0 is a completely normal valid state
+                        if (isBatteryRateSensor ? newIsValid : (!currentIsValid || newIsNonZero || (!currentIsNonZero && newIsValid)))
                         {
                             pendingValues[hardwareSensor] = newValue;
                         }
@@ -1865,8 +1893,32 @@ namespace XboxGamingBarHelper.Performance
         {
             try
             {
-                // Build JSON with all sensor values for flexible display
-                float batteryDrain = BatteryDischargeRate.Value > 0 ? BatteryDischargeRate.Value : -BatteryChargeRate.Value;
+                // Determine accurate power and charging state
+                bool isDischarging = false;
+                bool isCharging = false;
+                try
+                {
+                    var battStatus = PowerManager.BatteryStatus;
+                    var powerSupply = PowerManager.PowerSupplyStatus;
+                    isDischarging = battStatus == BatteryStatus.Discharging || 
+                                    powerSupply == PowerSupplyStatus.NotPresent || 
+                                    BatteryDischargeRate.Value > 0;
+                    isCharging = (battStatus == BatteryStatus.Charging || 
+                                 (powerSupply != PowerSupplyStatus.NotPresent && BatteryDischargeRate.Value <= 0 && BatteryChargeRate.Value > 0)) && 
+                                 !isDischarging;
+                }
+                catch
+                {
+                    isDischarging = BatteryDischargeRate.Value > 0;
+                    isCharging = BatteryChargeRate.Value > 0 && !isDischarging;
+                }
+
+                if (isDischarging)
+                {
+                    BatteryChargeRate.Value = 0f;
+                }
+
+                float batteryDrain = isDischarging ? BatteryDischargeRate.Value : (isCharging ? -BatteryChargeRate.Value : 0f);
                 float cpuUsage = CPUUsage.Value;
                 float gpuUsage = GPUUsage.Value;
                 float cpuTemp = CPUTemperature.Value;
@@ -1875,9 +1927,8 @@ namespace XboxGamingBarHelper.Performance
                 float gpuWattage = GPUWattage.Value;
                 float memoryUsage = MemoryUsage.Value;
                 float batteryLevel = BatteryLevel.Value;
-                float timeRemaining = BatteryTimeRemaining;
-                float timeToFull = BatteryTimeToFull;
-                bool isCharging = BatteryChargeRate.Value > 0;
+                float timeRemaining = isDischarging ? BatteryTimeRemaining : -1;
+                float timeToFull = isCharging ? BatteryTimeToFull : -1;
 
                 // Format as JSON with all metrics
                 string json = $"{{" +

@@ -724,6 +724,18 @@ namespace XboxGamingBarHelper.Labs
             }
         }
 
+        /// <summary>
+        /// Called when the system resumes from sleep / hibernate.
+        /// Resets the watchdog silence timer so it does not falsely treat the
+        /// sleep interval as a wedged HID read loop, and clears stale cached samples.
+        /// </summary>
+        public void OnResumeFromSleep()
+        {
+            _lastReadTicks = DateTime.UtcNow.Ticks;
+            ClearCachedSamples();
+            Logger.Info("LegionButtonMonitor: Reset watchdog silence marker and cleared cached samples on resume from sleep");
+        }
+
         private static bool IsSupportedLegionControllerVidPid(ushort vid, ushort pid)
         {
             return IsLegionTabletControllerVidPid(vid, pid) || IsLegionGoSControllerVidPid(vid, pid);
@@ -4588,11 +4600,9 @@ namespace XboxGamingBarHelper.Labs
                             break;
                         }
 
-                        // No further fallback — the dedicated ViGEm pad was retired
-                        // (phase 2). All three delivery tiers declined, which means
-                        // the VIIPER guide-only pad is offline (usbip-win2 missing);
-                        // the setup banner is already pointing the user at it.
-                        Logger.Warn($"LegionButtonMonitor: No virtual pad available for Xbox Guide press ({buttonName}) — is usbip-win2 installed?");
+                        // Fallback when virtual pad is offline or declining: fire Win+G via Win32 User32
+                        Logger.Info($"LegionButtonMonitor: No virtual pad accepted Guide press — firing Win+G fallback for {buttonName}");
+                        Program.SendKeyboardShortcut("Win+G");
                         break;
 
                     case LegionButtonAction.KeyboardShortcut:
@@ -4689,10 +4699,10 @@ namespace XboxGamingBarHelper.Labs
         }
 
         /// <summary>
-        /// When Steam or a Steam game is active, emit the appropriate Steam shortcut (Shift+Tab for
-        /// in-game overlay, Ctrl+Alt+1 for Steam Big Picture menu) and suppress the raw virtual Xbox Guide
-        /// pulse. This prevents Windows from intercepting the Guide button and opening the Xbox Game Bar
-        /// on top of Steam. Returns true if handled.
+        /// When Steam or a Steam game is active, emit the appropriate shortcut (Shift+Tab for
+        /// in-game overlay, Ctrl+1 for Steam Big Picture menu) and suppress the raw virtual Xbox Guide
+        /// pulse. When Controller Emulation is OFF, handles desktop Guide actions via Big Picture focus
+        /// or Game Bar fallback. Returns true if handled.
         /// </summary>
         private static bool TryHandleSteamGuideOverlay()
         {
@@ -4701,23 +4711,35 @@ namespace XboxGamingBarHelper.Labs
                 var guideMode = Program.SettingsManager?.ViiperGuideButtonMode?.Value;
                 if (string.Equals(guideMode, "GameBar", StringComparison.OrdinalIgnoreCase))
                 {
-                    // User explicitly wants Game Bar mode; do not divert to Steam
-                    return false;
+                    Logger.Info("LegionButtonMonitor: GuideMode=GameBar — firing Win+G");
+                    Program.SendKeyboardShortcut("Win+G");
+                    return true;
                 }
 
-                // Check for active Steam game or Steam window
+                // 1. Check for active/foreground game via SystemManager
                 var runningGameProp = Program.SystemManager?.RunningGame;
                 if (runningGameProp != null)
                 {
                     var rg = runningGameProp.Value;
-                    if (rg.IsValid() && rg.IsForeground && !string.IsNullOrEmpty(rg.GameId.Path) && rg.GameId.Path.IndexOf("steamapps", StringComparison.OrdinalIgnoreCase) >= 0)
+                    if (rg.IsValid() && rg.IsForeground)
                     {
-                        Logger.Info($"LegionButtonMonitor: Active Steam game '{rg.GameId.Name}' — firing Shift+Tab overlay shortcut");
-                        Program.SendKeyboardShortcut("Shift+Tab");
-                        return true;
+                        if (!string.IsNullOrEmpty(rg.GameId.Path) && rg.GameId.Path.IndexOf("steamapps", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            Logger.Info($"LegionButtonMonitor: Active Steam game '{rg.GameId.Name}' — firing Shift+Tab overlay shortcut");
+                            Program.SendKeyboardShortcut("Shift+Tab");
+                            return true;
+                        }
+                        else
+                        {
+                            // Active foreground non-Steam game -> fire Game Bar
+                            Logger.Info($"LegionButtonMonitor: Active non-Steam game '{rg.GameId.Name}' — firing Win+G Game Bar shortcut");
+                            Program.SendKeyboardShortcut("Win+G");
+                            return true;
+                        }
                     }
                 }
 
+                // 2. Check foreground window/process
                 int fgPid = Windows.User32.GetForegroundProcessId();
                 if (fgPid > 0)
                 {
@@ -4729,6 +4751,7 @@ namespace XboxGamingBarHelper.Labs
                             string procPath = "";
                             try { procPath = proc.MainModule?.FileName ?? ""; } catch { }
 
+                            // Steam game (by path)
                             if (procPath.IndexOf("steamapps", StringComparison.OrdinalIgnoreCase) >= 0)
                             {
                                 Logger.Info($"LegionButtonMonitor: Foreground Steam game '{procName}' — firing Shift+Tab overlay shortcut");
@@ -4736,11 +4759,40 @@ namespace XboxGamingBarHelper.Labs
                                 return true;
                             }
 
+                            // Steam Big Picture or Steam client window
+                            if (procName == "steam" || procName == "steamwebhelper")
+                            {
+                                Logger.Info($"LegionButtonMonitor: Foreground is Steam ('{procName}') — firing F1 Big Picture menu shortcut");
+                                Program.SendKeyboardShortcut("F1");
+                                return true;
+                            }
 
+                            // Xbox App or Game Bar window: do NOT inject Win+G (which would close Game Bar or steal focus from Xbox App)
+                            if (procName.Contains("xbox") || procName.Contains("gamebar"))
+                            {
+                                Logger.Info($"LegionButtonMonitor: Foreground is Xbox/GameBar ('{procName}') — delegating to Guide button routing");
+                                return false;
+                            }
                         }
                     }
-                    catch { }
+                    catch (Exception ex)
+                    {
+                        Logger.Debug($"LegionButtonMonitor: Error inspecting foreground process {fgPid}: {ex.Message}");
+                    }
                 }
+
+                // 3. Neither a Steam game nor Steam is foreground.
+                // If master Controller Emulation is enabled, defer to VIIPER forwarder for emulated Guide pulse.
+                bool emulationEnabled = Program.ControllerEmulationManager?.EmulationEnabled ?? false;
+                if (emulationEnabled)
+                {
+                    return false;
+                }
+
+                // Default fallback: Game Bar (do NOT pull Steam to foreground when on other windows/desktop)
+                Logger.Info("LegionButtonMonitor: Foreground is neither Steam nor a Steam game — firing Win+G Game Bar shortcut");
+                Program.SendKeyboardShortcut("Win+G");
+                return true;
             }
             catch (Exception ex)
             {

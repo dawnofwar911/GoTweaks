@@ -1,4 +1,4 @@
-using Microsoft.Gaming.XboxGameBar;
+﻿using Microsoft.Gaming.XboxGameBar;
 using Microsoft.Gaming.XboxGameBar.Input;
 using Microsoft.UI.Xaml.Controls;
 using NLog;
@@ -88,6 +88,21 @@ namespace XboxGamingBar
                 {
                     _helperIntentionalExitUtc = DateTime.UtcNow;
                     Logger.Info($"Helper signaled intentional exit ({exitReason}) — suppressing auto-relaunch on the imminent disconnect.");
+                    return;
+                }
+
+                // Helper notified us that its managers and property registry are now ready.
+                // Trigger a full sync and update the Setup tab status so any properties that were
+                // pending initialization are populated.
+                if (message.TryGetValue("HelperManagersReady", out object readyObj))
+                {
+                    Logger.Info("Helper signaled HelperManagersReady - syncing properties and updating setup tab status");
+                    TryRunOnDispatcher(async () =>
+                    {
+                        HideConnectionBanner();
+                        await properties.Sync();
+                        UpdateSetupTabStatus();
+                    }, "PipeClient_MessageReceived/managersReady");
                     return;
                 }
 

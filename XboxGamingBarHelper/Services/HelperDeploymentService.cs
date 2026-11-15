@@ -122,15 +122,23 @@ namespace XboxGamingBarHelper.Services
             "System.Runtime.CompilerServices.Unsafe.dll",
             "System.Threading.Tasks.Extensions.dll",
             "System.ValueTuple.dll",
-            "System.IO.Pipelines.dll",
-            "System.CodeDom.dll",
-            "Microsoft.Bcl.AsyncInterfaces.dll"
+            "Microsoft.Bcl.AsyncInterfaces.dll",
+            "Nefarius.Drivers.HidHide.dll",
+            "Nefarius.Utilities.DeviceManagement.dll",
+            // VIIPER controller emulation backend (phase 1: runtime-pluggable alongside ViGEm)
+            "libviiper.dll",
+            // usbip-win2 CLI for VIIPER UDE attach/detach operations (Phase 2, Stage A)
+            "usbip.exe",
         };
 
         /// <summary>
-        /// Gets the current package version from MSIX
+        /// Gets the package version from MSIX identity, or null when the process has no
+        /// package identity (e.g. running from the deployed LocalCache copy). Use this
+        /// wherever a wrong-but-plausible version is worse than no version at all —
+        /// the assembly-version fallback below is a hardcoded 1.0.0.0 and stamping it
+        /// into .version would wedge IsDeploymentNeeded into a permanent mismatch.
         /// </summary>
-        public static string GetCurrentPackageVersion()
+        public static string GetPackageVersionFromIdentity()
         {
             try
             {
@@ -141,17 +149,31 @@ namespace XboxGamingBarHelper.Services
             catch (Exception ex)
             {
                 Logger.Debug($"Could not get package version (not running in MSIX?): {ex.Message}");
-                // Fall back to assembly version
-                try
-                {
-                    var assembly = Assembly.GetExecutingAssembly();
-                    var version = assembly.GetName().Version;
-                    return version?.ToString() ?? "0.0.0.0";
-                }
-                catch
-                {
-                    return "0.0.0.0";
-                }
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Gets the current package version from MSIX
+        /// </summary>
+        public static string GetCurrentPackageVersion()
+        {
+            var identityVersion = GetPackageVersionFromIdentity();
+            if (identityVersion != null)
+            {
+                return identityVersion;
+            }
+
+            // Fall back to assembly version
+            try
+            {
+                var assembly = Assembly.GetExecutingAssembly();
+                var version = assembly.GetName().Version;
+                return version?.ToString() ?? "0.0.0.0";
+            }
+            catch
+            {
+                return "0.0.0.0";
             }
         }
 
@@ -175,29 +197,55 @@ namespace XboxGamingBarHelper.Services
         }
 
         /// <summary>
-        /// Checks if deployment is needed (missing or version mismatch)
+        /// Checks if deployment is needed (package version != deployed version, or files missing)
         /// </summary>
         public static bool IsDeploymentNeeded()
         {
-            // Check if exe exists
-            if (!File.Exists(DeployedExePath))
+            try
             {
-                Logger.Info("Deployment needed: Helper exe not found at deployed location");
+                // If deployed exe doesn't exist, we definitely need deployment
+                if (!File.Exists(DeployedExePath))
+                {
+                    Logger.Info("Deployment needed: Deployed executable not found");
+                    return true;
+                }
+
+                // Check version
+                var currentVersion = GetCurrentPackageVersion();
+                var deployedVersion = GetDeployedVersion();
+
+                if (string.IsNullOrEmpty(deployedVersion))
+                {
+                    Logger.Info("Deployment needed: No deployed version found");
+                    return true;
+                }
+
+                if (!string.Equals(currentVersion, deployedVersion, StringComparison.OrdinalIgnoreCase))
+                {
+                    Logger.Info($"Deployment needed: Version mismatch (package: {currentVersion}, deployed: {deployedVersion})");
+                    return true;
+                }
+
+                // Quick sanity check: verify key files exist in deployed folder
+                var keyFiles = new[] { "XboxGamingBarHelper.exe", "Shared.dll", "NLog.dll", "libviiper.dll", "usbip.exe" };
+                foreach (var file in keyFiles)
+                {
+                    if (!File.Exists(Path.Combine(HelperFolder, file)))
+                    {
+                        Logger.Info($"Deployment needed: Key file missing: {file}");
+                        return true;
+                    }
+                }
+
+                Logger.Debug($"Deployment up to date (version {currentVersion})");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error(ex, "Error checking if deployment is needed");
+                // On error, assume deployment is needed to be safe
                 return true;
             }
-
-            // Check version
-            var currentVersion = GetCurrentPackageVersion();
-            var deployedVersion = GetDeployedVersion();
-
-            if (string.IsNullOrEmpty(deployedVersion) || deployedVersion != currentVersion)
-            {
-                Logger.Info($"Deployment needed: Version mismatch (deployed={deployedVersion}, current={currentVersion})");
-                return true;
-            }
-
-            Logger.Info($"Deployment up to date: Version {currentVersion}");
-            return false;
         }
 
         /// <summary>
@@ -235,27 +283,37 @@ namespace XboxGamingBarHelper.Services
         }
 
         /// <summary>
-        /// Gets the source directory (MSIX helper folder path)
+        /// Gets the source directory where helper files are located (MSIX package)
         /// </summary>
         public static string GetSourceDirectory()
         {
             try
             {
-                var exePath = Process.GetCurrentProcess().MainModule?.FileName;
-                if (!string.IsNullOrEmpty(exePath))
+                // Try to get from package location first
+                var package = global::Windows.ApplicationModel.Package.Current;
+                var packagePath = package.InstalledLocation.Path;
+                var helperSubdir = Path.Combine(packagePath, "XboxGamingBarHelper");
+
+                if (Directory.Exists(helperSubdir))
                 {
-                    return Path.GetDirectoryName(exePath);
+                    return helperSubdir;
                 }
+
+                // Fallback to package root
+                return packagePath;
             }
-            catch (Exception ex)
+            catch
             {
-                Logger.Debug($"Could not get source directory: {ex.Message}");
+                // Fallback: directory of currently executing assembly
+                var assemblyLocation = Assembly.GetExecutingAssembly().Location;
+                return Path.GetDirectoryName(assemblyLocation) ?? "";
             }
-            return null;
         }
 
         /// <summary>
-        /// Deploys the helper files to the stable LocalAppData location
+        /// Deploys helper files from MSIX package to the stable LocalCache folder.
+        /// Overwrites existing files with retry logic for locked files.
+        /// Writes .version file on completion.
         /// </summary>
         /// <returns>True if deployment succeeded</returns>
         public static bool DeployHelper()
@@ -263,9 +321,9 @@ namespace XboxGamingBarHelper.Services
             try
             {
                 var sourceDir = GetSourceDirectory();
-                if (string.IsNullOrEmpty(sourceDir))
+                if (string.IsNullOrEmpty(sourceDir) || !Directory.Exists(sourceDir))
                 {
-                    Logger.Error("Cannot deploy: Could not determine source directory");
+                    Logger.Error($"Source directory not found: {sourceDir}");
                     return false;
                 }
 
@@ -284,7 +342,29 @@ namespace XboxGamingBarHelper.Services
                 if (PathsAreSame(sourceDir, HelperFolder))
                 {
                     Logger.Warn($"Deploy source equals deployed folder ({HelperFolder}); skipping self-copy (files already in place).");
-                    return File.Exists(DeployedExePath);
+
+                    // #97: if the files are in place but .version is missing/stale, this
+                    // no-op path used to leave the mismatch in place forever. Re-stamp —
+                    // but only with a real package-identity version; the assembly-version
+                    // fallback (1.0.0.0) would poison the stamp and recreate the loop.
+                    if (File.Exists(DeployedExePath))
+                    {
+                        var identityVersion = GetPackageVersionFromIdentity();
+                        if (identityVersion != null && GetDeployedVersion() != identityVersion)
+                        {
+                            try
+                            {
+                                File.WriteAllText(VersionFilePath, identityVersion);
+                                Logger.Info($"Version file re-stamped on self-copy no-op: {identityVersion}");
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.Warn($"Could not re-stamp version file: {ex.Message}");
+                            }
+                        }
+                        return true;
+                    }
+                    return false;
                 }
 
                 // Create target directory
@@ -372,7 +452,11 @@ namespace XboxGamingBarHelper.Services
                 }
 
                 Logger.Info($"Deployment complete: {successCount} files copied, {failCount} failures");
-                return successCount > 0 && File.Exists(DeployedExePath);
+                // #97: success must match the .version stamp condition. Returning true on a
+                // partial deploy (failCount>0) let PerformSetup report "Setup Complete" while
+                // .version was never written — every launch then re-detected a mismatch and
+                // re-fired UAC, forever. Fail loudly instead so setup surfaces the error.
+                return deployOk;
             }
             catch (Exception ex)
             {

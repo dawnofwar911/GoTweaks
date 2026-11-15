@@ -873,7 +873,8 @@ namespace XboxGamingBarHelper
         {
             try
             {
-                viiperEmulationManager?.OnGuideRouteChanged();
+                // Run on thread pool so button configuration and pipe message handlers are never blocked
+                Task.Run(() => viiperEmulationManager?.OnGuideRouteChanged());
             }
             catch (Exception ex)
             {
@@ -1416,6 +1417,7 @@ namespace XboxGamingBarHelper
                 await Task.Delay(200);
 
                 // Send focus command to widget via Named Pipes (works when running elevated)
+                bool focusedViaPipe = false;
                 if (IsPipeConnected)
                 {
                     var pipeMsg = new Shared.IPC.PipeMessage
@@ -1426,15 +1428,38 @@ namespace XboxGamingBarHelper
                     if (SendPipeMessage(pipeMsg))
                     {
                         Logger.Info("Labs: Sent focus widget command via Named Pipe");
+                        focusedViaPipe = true;
                     }
                     else
                     {
-                        Logger.Warn("Labs: Failed to send focus widget command via Named Pipe");
+                        Logger.Warn("Labs: Failed to send focus widget command via Named Pipe, attempting protocol activation fallback");
                     }
                 }
                 else
                 {
-                    Logger.Warn("Labs: Cannot send focus widget command - no pipe connection available");
+                    Logger.Info("Labs: Pipe not connected (widget suspended or closed) - activating widget via protocol URI");
+                }
+
+                // If pipe was not connected or message delivery failed, activate the widget directly via protocol URI:
+                // ms-gamebarwidget:GamingWidget
+                if (!focusedViaPipe)
+                {
+                    try
+                    {
+                        var psi = new System.Diagnostics.ProcessStartInfo
+                        {
+                            FileName = "explorer.exe",
+                            Arguments = "ms-gamebarwidget:GamingWidget",
+                            UseShellExecute = true,
+                            CreateNoWindow = true
+                        };
+                        System.Diagnostics.Process.Start(psi);
+                        Logger.Info("Labs: Activated ms-gamebarwidget:GamingWidget via protocol URI");
+                    }
+                    catch (Exception pEx)
+                    {
+                        Logger.Error($"Labs: Failed to launch widget via protocol URI: {pEx.Message}");
+                    }
                 }
             }
             catch (Exception ex)

@@ -1,4 +1,4 @@
-﻿using Microsoft.Gaming.XboxGameBar;
+using Microsoft.Gaming.XboxGameBar;
 using Microsoft.Gaming.XboxGameBar.Input;
 using Microsoft.UI.Xaml.Controls;
 using NLog;
@@ -1085,7 +1085,8 @@ namespace XboxGamingBar
                     // == Adequate, which flips to Inadequate once the battery hits 100% (the
                     // charger stops actively drawing current), wrongly showing the non-charging
                     // icon on a fully-charged, still-plugged-in device.
-                    bool deviceCharging = PowerManager.PowerSupplyStatus != PowerSupplyStatus.NotPresent;
+                    bool isDischarging = PowerManager.BatteryStatus == BatteryStatus.Discharging;
+                    bool deviceCharging = PowerManager.PowerSupplyStatus != PowerSupplyStatus.NotPresent && !isDischarging;
                     string deviceIndicator = (deviceCharging && deviceBat < 100) ? "⚡" : "";
 
                     // Get the tile content elements

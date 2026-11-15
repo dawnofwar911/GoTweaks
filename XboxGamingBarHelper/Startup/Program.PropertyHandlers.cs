@@ -73,6 +73,10 @@ namespace XboxGamingBarHelper
             // until three tick-level write failures trigger the self-heal.
             legionManager?.RecoverEcFanOverrideAfterResume();
 
+            // Refresh Legion button monitor after resume: reset watchdog timer and clear stale cached samples
+            try { legionButtonMonitor?.OnResumeFromSleep(); }
+            catch (Exception ex) { Logger.Warn($"Resume (LegionButtonMonitor) threw: {ex.Message}"); }
+
             // Re-apply the user's controller lighting after the controllers finish
             // re-enumerating. The firmware wakes with whatever its active RGB profile
             // slot holds — Legion Space leftovers or a mid-reactive-flash frame — so

@@ -1,4 +1,4 @@
-using Microsoft.Gaming.XboxGameBar;
+﻿using Microsoft.Gaming.XboxGameBar;
 using Microsoft.Gaming.XboxGameBar.Input;
 using Microsoft.UI.Xaml.Controls;
 using NLog;
@@ -5188,6 +5188,9 @@ namespace XboxGamingBar
                     // Right Stick section never appears. Call once explicitly so the section
                     // shows on first connect when applicable.
                     UpdateViiperStickGyroSectionVisibility();
+
+                    // Refresh Setup tab visibility after property sync
+                    UpdateSetupTabStatus();
 
                     Logger.Info("[PIPE] Inside dispatcher - post-sync UI updates complete");
                 });

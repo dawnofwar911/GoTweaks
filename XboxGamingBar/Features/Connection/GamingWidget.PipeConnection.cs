@@ -1,4 +1,4 @@
-using Microsoft.Gaming.XboxGameBar;
+﻿using Microsoft.Gaming.XboxGameBar;
 using Microsoft.Gaming.XboxGameBar.Input;
 using Microsoft.UI.Xaml.Controls;
 using NLog;
@@ -90,8 +90,8 @@ namespace XboxGamingBar
                     Logger.Info($"Attempting pipe connection ({attempt}/{maxAttempts}, timeout={timeoutMs}ms)...");
                 }
 
-                // After 8 seconds, show InitialSetup banner (likely UAC/setup in progress)
-                if (!shownInitialSetupBanner && (DateTime.Now - startTime).TotalSeconds >= 8)
+                // After 25 seconds, show InitialSetup banner (likely UAC/setup in progress)
+                if (!shownInitialSetupBanner && (DateTime.Now - startTime).TotalSeconds >= 25)
                 {
                     shownInitialSetupBanner = true;
                     TryRunOnDispatcher(() =>

@@ -81,11 +81,11 @@ namespace XboxGamingBar
                     // silently swallows - leaving the UI stuck on stale/blank values even though the
                     // data itself is fine. This gives the paint a guaranteed second chance on the
                     // next open instead of requiring the user to notice and manually reopen.
-                    UpdateLegionControllerBatteryDisplay();
-                    UpdateLegionControllerVidPidDisplay();
-
                     var ignoreFocus = Dispatcher.RunAsync(Windows.UI.Core.CoreDispatcherPriority.Low, () =>
                     {
+                        UpdateLegionControllerBatteryDisplay();
+                        UpdateLegionControllerVidPidDisplay();
+
                         // Anchor gamepad focus on open — UNCONDITIONALLY. Earlier
                         // heuristics ("only when focus is null / on a ScrollViewer")
                         // kept missing whatever non-visual element Game Bar actually

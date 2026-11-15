@@ -26,7 +26,8 @@ namespace XboxGamingBar.Data
             var syncTimer = Stopwatch.StartNew();
 
             // Try batch sync first
-            if (await TryBatchSync())
+            var batchResult = await TryBatchSync();
+            if (batchResult == BatchSyncResult.Success)
             {
                 // Batch sync bypasses individual Sync() calls which enable controls.
                 // Call OnBatchSyncCompleted() on each property to enable controls.
@@ -40,7 +41,20 @@ namespace XboxGamingBar.Data
                 return;
             }
 
-            // Fallback to individual sync
+            if (batchResult == BatchSyncResult.NotReady)
+            {
+                Logger.Warn("Batch sync: Helper is still initializing managers; skipping individual fallback to avoid uninitialized property states");
+                return;
+            }
+
+            // Do NOT fall back to individual sync if pipe is not connected
+            if (!App.IsConnected)
+            {
+                Logger.Warn("Batch sync failed and pipe is not connected; skipping individual fallback");
+                return;
+            }
+
+            // Fallback to individual sync ONLY if actual failure (not just NotReady)
             Logger.Warn("Batch sync failed, falling back to individual sync");
             int count = 0;
             foreach (var property in properties)
@@ -82,33 +96,37 @@ namespace XboxGamingBar.Data
         /// Attempt to sync all properties in a single batch request.
         /// Retries if helper returns NotReady (managers still initializing).
         /// </summary>
-        private async Task<bool> TryBatchSync()
+        private async Task<BatchSyncResult> TryBatchSync()
         {
-            const int maxNotReadyRetries = 30;  // 30 retries x 500ms = 15 seconds max wait
+            const int maxNotReadyRetries = 90;  // 90 retries x 500ms = 45 seconds max wait
             const int notReadyRetryDelayMs = 500;
+            BatchSyncResult lastResult = BatchSyncResult.Failed;
 
             for (int attempt = 0; attempt < maxNotReadyRetries; attempt++)
             {
-                var result = await TryBatchSyncOnce(attempt > 0);
-                if (result == BatchSyncResult.Success)
+                lastResult = await TryBatchSyncOnce(attempt > 0);
+                if (lastResult == BatchSyncResult.Success)
                 {
-                    return true;
+                    return BatchSyncResult.Success;
                 }
-                else if (result == BatchSyncResult.NotReady)
+                else if (lastResult == BatchSyncResult.NotReady)
                 {
-                    Logger.Info($"Batch sync: Helper not ready (attempt {attempt + 1}/{maxNotReadyRetries}), retrying in {notReadyRetryDelayMs}ms...");
+                    if (attempt % 10 == 0 || attempt == maxNotReadyRetries - 1)
+                    {
+                        Logger.Info($"Batch sync: Helper not ready (attempt {attempt + 1}/{maxNotReadyRetries}), retrying in {notReadyRetryDelayMs}ms...");
+                    }
                     await Task.Delay(notReadyRetryDelayMs);
                     continue;
                 }
                 else
                 {
                     // Other failure - don't retry
-                    return false;
+                    return lastResult;
                 }
             }
 
             Logger.Warn($"Batch sync: Helper still not ready after {maxNotReadyRetries} attempts");
-            return false;
+            return lastResult;
         }
 
         private enum BatchSyncResult
@@ -177,6 +195,11 @@ namespace XboxGamingBar.Data
 
                 // Check if helper returned NotReady (managers still initializing)
                 if (response.TryGetValue("NotReady", out object notReadyObj) && notReadyObj is bool notReady && notReady)
+                {
+                    return BatchSyncResult.NotReady;
+                }
+
+                if (response.TryGetValue("Error", out object errObj) && errObj is string errStr && errStr.IndexOf("not initialized", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     return BatchSyncResult.NotReady;
                 }

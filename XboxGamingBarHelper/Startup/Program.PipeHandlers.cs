@@ -1,4 +1,4 @@
-using NLog;
+﻿using NLog;
 using Shared.Constants;
 using Shared.Data;
 using Shared.IPC;
@@ -1565,19 +1565,18 @@ namespace XboxGamingBarHelper
                         response.Add("Content", $"Error: {ex.Message}");
                     }
                 }
-                else if (properties == null)
+                else if (!_managersReady || properties == null)
                 {
-                    // The property registry never came up (a manager failed to initialize, or
-                    // registry construction threw). Without this guard every Get/Set would NRE
-                    // here and silently apply nothing — the exact failure behind issue #104 on
-                    // Legion Go S. Return a clear error instead so the client doesn't hang and
-                    // the cause is obvious in the log.
-                    Logger.Error($"Property registry not initialized; cannot handle {request.Function} (RequestId={request.RequestId})");
+                    // The property registry is still initializing or never came up.
+                    // Return NotReady so the client knows managers are still initializing rather than
+                    // treating it as a permanent missing tool or invalid property.
+                    Logger.Warn($"Helper not ready yet; cannot handle {request.Function} (RequestId={request.RequestId}, managersReady={_managersReady}, propertiesNull={properties == null})");
                     response = new global::Windows.Foundation.Collections.ValueSet
                     {
                         { nameof(Function), (int)request.Function },
                         { nameof(Shared.Enums.Command), (int)Shared.Enums.Command.Response },
-                        { "Error", "Helper property registry not initialized" },
+                        { "NotReady", true },
+                        { "Error", "Helper initializing" }
                     };
                 }
                 else

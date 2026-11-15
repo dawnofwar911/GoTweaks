@@ -1,4 +1,4 @@
-using NLog;
+﻿using NLog;
 using Shared.Constants;
 using Shared.Data;
 using Shared.IPC;
@@ -121,6 +121,7 @@ namespace XboxGamingBarHelper
 
         internal static SettingsManager SettingsManager => settingsManager;
         internal static SystemManager SystemManager => systemManager;
+        internal static ControllerEmulationManager ControllerEmulationManager => controllerEmulationManager;
 
         public static OnScreenDisplayProperty onScreenDisplay;
         public static List<OnScreenDisplayManager> onScreenDisplayProviders;
@@ -2016,6 +2017,29 @@ namespace XboxGamingBarHelper
             // Pipe server was started earlier, widget may already be connected and waiting
             _managersReady = true;
             Logger.Info("Managers ready - BatchGet requests will now be processed");
+
+            // Broadcast readiness to any connected clients (e.g. Game Bar widget) that connected during initialization
+            try
+            {
+                var readyMsg = new Shared.IPC.PipeMessage
+                {
+                    Command = Shared.Enums.Command.Response,
+                    Extra = new Dictionary<string, object>
+                    {
+                        ["HelperManagersReady"] = true
+                    }
+                };
+                pipeServer?.SendMessage(readyMsg.ToJson());
+                Logger.Info("Broadcasted HelperManagersReady to connected clients");
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Failed to broadcast HelperManagersReady: {ex.Message}");
+            }
+
+            // Re-push setup warnings now that all managers (pawnIO, usbip, etc.) are fully initialized
+            try { SendSetupWarningsToWidget(force: true); }
+            catch (Exception ex) { Logger.Warn($"Failed to push setup warnings on managers ready: {ex.Message}"); }
 
             // #66: bring up PresentMon integration after managers are ready. Lifecycle is
             // driven from RunningGame_PropertyChanged → OnRunningGameChangedForPresentMon.

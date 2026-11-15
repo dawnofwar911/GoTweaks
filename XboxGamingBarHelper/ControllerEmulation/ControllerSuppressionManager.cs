@@ -177,25 +177,53 @@ namespace XboxGamingBarHelper.ControllerEmulation
             }
         }
 
+        private static int _isEnablingDevnodes = 0;
+
         public void EnablePhysicalXInputDevnodes()
         {
-            try
+            if (System.Threading.Interlocked.CompareExchange(ref _isEnablingDevnodes, 1, 0) != 0)
             {
-                var targets = QueryUsbDeviceIds(0x17EF, 0x6182, 0x6183, 0x6184, 0x6185, 0x61EB, 0x61EC, 0x61ED, 0x61EE)
-                    .Concat(QueryUsbDeviceIds(0x1A86, 0xE310, 0xE311))
-                    .Where(id => id.IndexOf("&MI_00", StringComparison.OrdinalIgnoreCase) >= 0)
-                    .ToList();
+                Logger.Debug("SuppressionManager: EnablePhysicalXInputDevnodes already in progress, skipping concurrent run.");
+                return;
+            }
 
-                foreach (string id in targets)
-                {
-                    bool launched = RunPnpUtil($"/enable-device \"{id}\"", out int exitCode, out string stdErr);
-                    Logger.Info($"SuppressionManager: pnputil /enable-device '{id}' launched={launched}, exit={exitCode}, err='{stdErr}'");
-                }
-            }
-            catch (Exception ex)
+            // Run asynchronously in background so pnputil's process execution latency (up to 30s) never blocks callers or pipe handlers
+            System.Threading.Tasks.Task.Run(() =>
             {
-                Logger.Warn($"SuppressionManager: EnablePhysicalXInputDevnodes threw: {ex.Message}");
-            }
+                try
+                {
+                    var targets = QueryUsbDeviceIds(0x17EF, 0x6182, 0x6183, 0x6184, 0x6185, 0x61EB, 0x61EC, 0x61ED, 0x61EE)
+                        .Concat(QueryUsbDeviceIds(0x1A86, 0xE310, 0xE311))
+                        .Where(id => id.IndexOf("&MI_00", StringComparison.OrdinalIgnoreCase) >= 0)
+                        .ToList();
+
+                    foreach (string id in targets)
+                    {
+                        bool launched = RunPnpUtil($"/enable-device \"{id}\"", out int exitCode, out string stdErr);
+                        Logger.Info($"SuppressionManager: pnputil /enable-device '{id}' launched={launched}, exit={exitCode}, err='{stdErr}'");
+                    }
+
+                    // Wildcard fallback to ensure physical XInput devnodes are re-enabled even if registry/WMI missed instance IDs
+                    string[] wildcardPnpIds = new[]
+                    {
+                        "USB\\VID_17EF&PID_61EB&MI_00*",
+                        "USB\\VID_17EF&PID_6182&MI_00*",
+                        "USB\\VID_1A86&PID_E310&MI_00*"
+                    };
+                    foreach (string wildcard in wildcardPnpIds)
+                    {
+                        RunPnpUtil($"/enable-device \"{wildcard}\"", out _, out _);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn($"SuppressionManager: EnablePhysicalXInputDevnodes threw: {ex.Message}");
+                }
+                finally
+                {
+                    System.Threading.Interlocked.Exchange(ref _isEnablingDevnodes, 0);
+                }
+            });
         }
 
         internal static string GetDetectedCliPath()
