@@ -127,8 +127,30 @@ namespace XboxGamingBarHelper.Services
             "Nefarius.Utilities.DeviceManagement.dll",
             // VIIPER controller emulation backend (phase 1: runtime-pluggable alongside ViGEm)
             "libviiper.dll",
-            // usbip-win2 CLI for VIIPER UDE attach/detach operations (Phase 2, Stage A)
-            "usbip.exe",
+            // NOTE: usbip.exe is deliberately NOT listed. It is an external dependency
+            // installed by usbip-win2 under C:\Program Files\USBip\ (see UsbipCli.ExePaths),
+            // never shipped in the package, so it must not take part in deployment.
+        };
+
+        /// <summary>
+        /// Files that must exist in the deployed folder for the deployment to be
+        /// considered complete. Only files that are always shipped in the package.
+        /// </summary>
+        private static readonly string[] MandatoryKeyFiles = new[]
+        {
+            "XboxGamingBarHelper.exe",
+            "Shared.dll",
+            "NLog.dll",
+        };
+
+        /// <summary>
+        /// Files that are checked only when the package source actually contains them,
+        /// so a build that omits one degrades gracefully instead of forcing a redeploy
+        /// (and the elevated --setup UAC prompt) on every launch.
+        /// </summary>
+        private static readonly string[] OptionalKeyFiles = new[]
+        {
+            "libviiper.dll",
         };
 
         /// <summary>
@@ -226,10 +248,28 @@ namespace XboxGamingBarHelper.Services
                     return true;
                 }
 
-                // Quick sanity check: verify key files exist in deployed folder
-                var keyFiles = new[] { "XboxGamingBarHelper.exe", "Shared.dll", "NLog.dll", "libviiper.dll", "usbip.exe" };
-                foreach (var file in keyFiles)
+                // Quick sanity check: verify key files exist in deployed folder.
+                // Only package-shipped files count: external dependencies (usbip.exe)
+                // are never deployed, and checking them made this return true forever,
+                // re-triggering the elevated --setup/UAC loop (#97).
+                foreach (var file in MandatoryKeyFiles)
                 {
+                    if (!File.Exists(Path.Combine(HelperFolder, file)))
+                    {
+                        Logger.Info($"Deployment needed: Key file missing: {file}");
+                        return true;
+                    }
+                }
+
+                string sourceDir = null;
+                try { sourceDir = GetSourceDirectory(); } catch { sourceDir = null; }
+                foreach (var file in OptionalKeyFiles)
+                {
+                    if (string.IsNullOrEmpty(sourceDir) || !File.Exists(Path.Combine(sourceDir, file)))
+                    {
+                        continue; // not shipped in this build: nothing to deploy, nothing to check
+                    }
+
                     if (!File.Exists(Path.Combine(HelperFolder, file)))
                     {
                         Logger.Info($"Deployment needed: Key file missing: {file}");
