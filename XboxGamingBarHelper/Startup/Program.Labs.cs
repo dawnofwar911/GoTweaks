@@ -854,13 +854,76 @@ namespace XboxGamingBarHelper
         /// </summary>
         internal static void NotifyDockStateChanged()
         {
+            // Callers run on the Legion HID read thread (BatteryUpdated /
+            // GamepadModeRawUpdated) or the pipe thread. OnDockStateChanged ->
+            // ReapplyMode takes startLock and can StartLocked (HidHide cycle-port +
+            // USBIP AddDevice, seconds) or cycle the very device being read, so it must
+            // never run inline. Debounce: one battery frame can report dock and
+            // connection changes together, and a gamepad-mode readback arrives right
+            // after, so coalesce bursts into a single reconcile on a worker thread.
             try
             {
-                viiperEmulationManager?.OnDockStateChanged();
+                lock (dockStateDebounceLock)
+                {
+                    if (dockStateDebounceTimer == null)
+                    {
+                        dockStateDebounceTimer = new System.Threading.Timer(
+                            _ => RunDockStateReconcile(), null, DockStateDebounceMs, System.Threading.Timeout.Infinite);
+                    }
+                    else
+                    {
+                        dockStateDebounceTimer.Change(DockStateDebounceMs, System.Threading.Timeout.Infinite);
+                    }
+                }
             }
             catch (Exception ex)
             {
-                Logger.Warn($"Labs: viiperEmulationManager.OnDockStateChanged threw: {ex.Message}");
+                Logger.Warn($"Labs: NotifyDockStateChanged scheduling threw: {ex.Message}");
+            }
+        }
+
+        private const int DockStateDebounceMs = 300;
+        private static readonly object dockStateDebounceLock = new object();
+        private static System.Threading.Timer dockStateDebounceTimer;
+        private static int dockStateReconcileRunning; // 0/1, Interlocked
+        private static int dockStateReconcilePending; // 0/1, Interlocked
+
+        private static void RunDockStateReconcile()
+        {
+            // Never run two reconciles at once; if a notification lands while one is
+            // in progress, run exactly one more afterwards so the final state wins.
+            if (Interlocked.Exchange(ref dockStateReconcileRunning, 1) == 1)
+            {
+                Interlocked.Exchange(ref dockStateReconcilePending, 1);
+                return;
+            }
+
+            try
+            {
+                do
+                {
+                    Interlocked.Exchange(ref dockStateReconcilePending, 0);
+                    try
+                    {
+                        viiperEmulationManager?.OnDockStateChanged();
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Warn($"Labs: viiperEmulationManager.OnDockStateChanged threw: {ex.Message}");
+                    }
+                }
+                while (Interlocked.CompareExchange(ref dockStateReconcilePending, 0, 0) == 1);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref dockStateReconcileRunning, 0);
+            }
+
+            // Close the window where a notification set Pending after the loop's last
+            // check but before Running was cleared: schedule one more pass.
+            if (Interlocked.CompareExchange(ref dockStateReconcilePending, 0, 0) == 1)
+            {
+                NotifyDockStateChanged();
             }
         }
 
