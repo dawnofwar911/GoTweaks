@@ -42,6 +42,9 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
         private uint activeSecondaryDeviceId;
         private string activeDeviceType = DefaultDeviceType;
         private bool viiperOwnsSuppression;
+        // One-shot per helper run: clear a stale HidHide cloak when VIIPER is the
+        // selected backend and Controller Emulation is off (see ReapplyMode).
+        private bool staleSuppressionCleanupDone;
 
         // Guide-only mode: when backend=VIIPER and the master Controller-Emulation
         // toggle is OFF, but a Labs button is mapped to "Xbox Guide", we spin up a
@@ -356,14 +359,36 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
                 if (isRunning) StopLocked();
                 if (guideOnlyMode) StopGuideOnly();
 
-                // Ensure HidHide suppression is fully disabled when emulation is not running
-                try
+                // HidHide suppression is shared with the legacy (ViGEm) backend's
+                // ControllerEmulationManager. Only release it when VIIPER owns it.
+                // When backendOn == false the legacy backend owns HidHide and may have
+                // the physical pad hidden behind a live ViGEm pad: disabling it here
+                // un-hid the physical controller (double input) on every dock/battery/
+                // guide-route event, and the legacy manager never re-asserted it.
+                if (viiperOwnsSuppression)
                 {
-                    legacyManager?.SuppressionManager?.Disable();
-                    Logger.Info("VIIPER: HidHide suppression disabled (emulation off)");
+                    try
+                    {
+                        legacyManager?.SuppressionManager?.Disable();
+                        Logger.Info("VIIPER: HidHide suppression disabled (emulation off)");
+                    }
+                    catch (Exception ex) { Logger.Warn($"HidHide Disable on emulation off threw: {ex.Message}"); }
+                    viiperOwnsSuppression = false;
                 }
-                catch (Exception ex) { Logger.Warn($"HidHide Disable on emulation off threw: {ex.Message}"); }
-                viiperOwnsSuppression = false;
+                else if (backendOn && !emulationEnabled && !staleSuppressionCleanupDone)
+                {
+                    // VIIPER is the selected backend and Controller Emulation is OFF, so
+                    // nobody should be hiding the physical pad. Clear a cloak left over from
+                    // a previous session (crash / hard kill) once per helper run, rather
+                    // than on every ReapplyMode (each Disable cycles devices + pnputil).
+                    staleSuppressionCleanupDone = true;
+                    try
+                    {
+                        legacyManager?.SuppressionManager?.Disable();
+                        Logger.Info("VIIPER: stale HidHide suppression cleared (VIIPER backend, emulation off)");
+                    }
+                    catch (Exception ex) { Logger.Warn($"HidHide stale-suppression cleanup threw: {ex.Message}"); }
+                }
             }
         }
 
@@ -1446,13 +1471,18 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
             try { forwarder.Stop(); }
             catch (Exception ex) { Logger.Warn($"forwarder.Stop threw: {ex.Message}"); }
 
-            try
+            // Only release HidHide if VIIPER enabled it: the suppression manager is shared
+            // with the legacy backend, which may own the cloak.
+            if (viiperOwnsSuppression)
             {
-                legacyManager?.SuppressionManager?.Disable();
-                Logger.Info("VIIPER: HidHide suppression disabled");
+                try
+                {
+                    legacyManager?.SuppressionManager?.Disable();
+                    Logger.Info("VIIPER: HidHide suppression disabled");
+                }
+                catch (Exception ex) { Logger.Warn($"VIIPER HidHide Disable threw: {ex.Message}"); }
+                viiperOwnsSuppression = false;
             }
-            catch (Exception ex) { Logger.Warn($"VIIPER HidHide Disable threw: {ex.Message}"); }
-            viiperOwnsSuppression = false;
 
             // (No physical-XInput restore here: register 04/0f is now owned solely by the
             // manual "Disable OS Reporting" toggle, not by emulation start/stop.)
@@ -1563,14 +1593,17 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
                 if (isRunning) StopLocked();
                 if (guideOnlyMode) StopGuideOnly();
 
-                // Ensure HidHide suppression is fully disabled when emulation is not running
-                try
+                // Release HidHide only if VIIPER still owns it (legacy backend owns it otherwise).
+                if (viiperOwnsSuppression)
                 {
-                    legacyManager?.SuppressionManager?.Disable();
-                    Logger.Info("VIIPER: HidHide suppression disabled (emulation off)");
+                    try
+                    {
+                        legacyManager?.SuppressionManager?.Disable();
+                        Logger.Info("VIIPER: HidHide suppression disabled (dispose)");
+                    }
+                    catch (Exception ex) { Logger.Warn($"HidHide Disable on dispose threw: {ex.Message}"); }
+                    viiperOwnsSuppression = false;
                 }
-                catch (Exception ex) { Logger.Warn($"HidHide Disable on emulation off threw: {ex.Message}"); }
-                viiperOwnsSuppression = false;
                 try { forwarder?.Dispose(); }
                 catch (Exception ex) { Logger.Warn($"forwarder.Dispose threw: {ex.Message}"); }
                 if (object.ReferenceEquals(activeInstance, this)) activeInstance = null;
