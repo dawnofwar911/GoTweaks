@@ -1394,58 +1394,28 @@ namespace XboxGamingBarHelper
 
         /// <summary>
         /// Execute a command/executable with optional arguments.
+        /// Remap commands come from the user's settings (LocalState, user-writable) or from a
+        /// pipe client, so they are NEVER run with the helper's elevation: they go through the
+        /// shell as the non-elevated user ("start" semantics: quoted exe + args, documents,
+        /// shortcuts, PATH lookup; programs that need admin show their own UAC prompt).
+        /// If that isn't possible the command is not run at all.
         /// </summary>
         private static void ExecuteCommand(string commandPath)
         {
             try
             {
-                if (string.IsNullOrEmpty(commandPath))
+                if (string.IsNullOrWhiteSpace(commandPath))
                     return;
 
-                // Parse the command - first part is the executable, rest are arguments
-                string exe;
-                string args = "";
-
-                // Check if the path is quoted
-                if (commandPath.StartsWith("\""))
+                string command = commandPath.Trim();
+                if (Services.UnelevatedLauncher.ShellExecuteCommand(command))
                 {
-                    int endQuote = commandPath.IndexOf('"', 1);
-                    if (endQuote > 0)
-                    {
-                        exe = commandPath.Substring(1, endQuote - 1);
-                        if (endQuote + 1 < commandPath.Length)
-                            args = commandPath.Substring(endQuote + 1).Trim();
-                    }
-                    else
-                    {
-                        exe = commandPath;
-                    }
+                    Logger.Info($"Labs: Executed command (non-elevated): {command}");
                 }
                 else
                 {
-                    // Find the first space that's not inside the exe path
-                    int spaceIndex = commandPath.IndexOf(' ');
-                    if (spaceIndex > 0)
-                    {
-                        exe = commandPath.Substring(0, spaceIndex);
-                        args = commandPath.Substring(spaceIndex + 1).Trim();
-                    }
-                    else
-                    {
-                        exe = commandPath;
-                    }
+                    Logger.Warn($"Labs: Could not run command as the non-elevated user; not running it: {command}");
                 }
-
-                var startInfo = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = exe,
-                    Arguments = args,
-                    UseShellExecute = true,
-                    WindowStyle = System.Diagnostics.ProcessWindowStyle.Normal
-                };
-
-                System.Diagnostics.Process.Start(startInfo);
-                Logger.Info($"Labs: Executed command: {exe} {args}");
             }
             catch (Exception ex)
             {

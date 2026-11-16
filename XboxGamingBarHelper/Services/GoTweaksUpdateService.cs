@@ -193,6 +193,32 @@ namespace XboxGamingBarHelper.Services
             }
         }
 
+        /// <summary>
+        /// True for a release-asset URL of <see cref="RepoPath"/>: https, default port, host
+        /// exactly github.com, path /&lt;owner&gt;/&lt;repo&gt;/releases/download/... Anything a pipe
+        /// client asks the elevated helper to download must pass this.
+        /// </summary>
+        internal static bool IsAllowedReleaseAssetUrl(Uri uri)
+        {
+            if (uri == null || !uri.IsAbsoluteUri) return false;
+            if (uri.Scheme != Uri.UriSchemeHttps || !uri.IsDefaultPort) return false;
+            if (!string.IsNullOrEmpty(uri.UserInfo)) return false;
+            if (!string.Equals(uri.Host, "github.com", StringComparison.OrdinalIgnoreCase)) return false;
+            return uri.AbsolutePath.StartsWith("/" + RepoPath + "/releases/download/", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Hosts a GitHub release download may be served from after redirects: github.com
+        /// itself or a *.githubusercontent.com CDN host (exact host or "." + domain suffix,
+        /// so look-alikes such as evilgithub.com don't match).
+        /// </summary>
+        internal static bool IsAllowedReleaseDownloadHost(string host)
+        {
+            if (string.IsNullOrEmpty(host)) return false;
+            host = host.ToLowerInvariant();
+            return host == "github.com" || host.EndsWith(".githubusercontent.com", StringComparison.Ordinal);
+        }
+
         /// <summary>Strips the leading "v" GitHub tags often carry ("v0.3.2" → "0.3.2").</summary>
         private static string NormaliseVersion(string tag)
         {
