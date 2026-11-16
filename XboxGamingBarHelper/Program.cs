@@ -281,6 +281,19 @@ namespace XboxGamingBarHelper
                     }
                 }
 
+                // Deployed helper (Program Files, no package identity): use the package's
+                // LocalCache\Local by its known family name, where the widget looks for logs.
+                if (string.IsNullOrEmpty(logDir))
+                {
+                    var packageLocalCache = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                        "Packages", Services.HelperDeploymentService.FallbackPackageFamilyName, "LocalCache");
+                    if (Directory.Exists(packageLocalCache))
+                    {
+                        logDir = Path.Combine(packageLocalCache, "Local");
+                    }
+                }
+
                 // Fallback to user's LocalAppData if we couldn't determine package path
                 if (string.IsNullOrEmpty(logDir))
                 {

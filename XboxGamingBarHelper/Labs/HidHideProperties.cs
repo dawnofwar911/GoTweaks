@@ -18,6 +18,9 @@ namespace XboxGamingBarHelper.Labs
         private const string PrimaryHidHideWingetId = "Nefarius.HidHide";
         private const string FallbackHidHideWingetId = "NefariusSoftwareSolutions.HidHide";
         private const string HidHideDirectDownloadUrl = "https://github.com/nefarius/HidHide/releases/download/v1.5.230.0/HidHide_1.5.230_x64.exe";
+        // SHA-256 of that exact release asset (fetched 2026-11-16; Authenticode signer
+        // "Nefarius Software Solutions e.U."). Bump together with the URL.
+        private const string HidHideDirectDownloadSha256 = "f4bbbcb82e6258641b887c74bc81c4c5f66e4aa811808dfc304347687b7605f6";
 
         public static bool IsInstalled()
         {
@@ -35,13 +38,23 @@ namespace XboxGamingBarHelper.Labs
                 return true;
             }
 
-            Logger.Info("Starting HidHide installation via winget...");
-            if (!TryInstallViaWinget(PrimaryHidHideWingetId) && !TryInstallViaWinget(FallbackHidHideWingetId))
+            // Pinned, hash-verified direct download first: it is the only path that may run
+            // silently with the helper's elevation. winget is the fallback and runs as the
+            // non-elevated user (it resolves to a user-writable app alias, so it must never
+            // be started elevated); the HidHide installer it fetches then asks for UAC.
+            Logger.Info("Starting HidHide installation via verified direct download...");
+            if (!TryInstallViaDirectDownload(out bool handedToUser))
             {
-                Logger.Warn("HidHide installation via winget failed; attempting direct download fallback...");
-                if (!TryInstallViaDirectDownload())
+                if (handedToUser)
                 {
-                    Logger.Warn("HidHide installation via direct download failed");
+                    // Already showing a UAC prompt for the installer; don't start a second one.
+                    Logger.Info("HidHide installer is waiting for UAC confirmation; not trying winget");
+                    return IsInstalled();
+                }
+                Logger.Warn("HidHide direct download install failed; attempting winget (non-elevated) fallback...");
+                if (!TryInstallViaWinget(PrimaryHidHideWingetId) && !TryInstallViaWinget(FallbackHidHideWingetId))
+                {
+                    Logger.Warn("HidHide installation via winget failed");
                     return false;
                 }
             }
@@ -53,134 +66,102 @@ namespace XboxGamingBarHelper.Labs
 
         private static bool TryInstallViaWinget(string packageId)
         {
-            string localWinget = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Microsoft",
-                "WindowsApps",
-                "winget.exe");
-
-            string[] candidates = new[]
-            {
-                "winget",
-                localWinget,
-            };
-
-            foreach (string candidate in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                if (Path.IsPathRooted(candidate) && !File.Exists(candidate))
-                {
-                    continue;
-                }
-
-                if (RunWingetInstall(candidate, packageId))
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
-        private static bool RunWingetInstall(string executable, string packageId)
-        {
+            // winget.exe is an app-execution alias under the user's
+            // %LOCALAPPDATA%\Microsoft\WindowsApps (user-writable) and is found through the
+            // user's PATH, so it is run as the NON-elevated user via cmd (which resolves it in
+            // the user's own environment). The installer it downloads raises its own UAC prompt.
             string arguments = $"install --id {packageId} -e --accept-package-agreements --accept-source-agreements --silent --disable-interactivity";
+            string cmd = Path.Combine(Environment.SystemDirectory, "cmd.exe");
 
             try
             {
-                var startInfo = new ProcessStartInfo
+                var result = Services.UnelevatedLauncher.Start(
+                    cmd, $"\"{cmd}\" /d /c winget {arguments}", hideWindow: true, waitMilliseconds: 180000);
+                if (!result.Started)
                 {
-                    FileName = executable,
-                    Arguments = arguments,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-
-                using Process process = Process.Start(startInfo);
-                if (process == null)
-                {
-                    Logger.Warn($"HidHide install failed to start: {executable} {arguments}");
+                    Logger.Warn($"HidHide winget install failed to start: winget {arguments}");
                     return false;
                 }
 
-                Logger.Info($"HidHide installer started ({executable}), PID={process.Id}");
+                Logger.Info($"HidHide winget install started (non-elevated), PID={result.ProcessId}");
 
-                if (!process.WaitForExit(180000))
+                if (!result.Exited)
                 {
-                    try { process.Kill(); } catch { }
-                    Logger.Warn("HidHide installation timed out after 3 minutes");
+                    Logger.Warn("HidHide winget installation did not finish within 3 minutes");
                     return false;
                 }
 
-                if (process.ExitCode == 0 || process.ExitCode == 3010)
+                if (result.ExitCode == 0 || result.ExitCode == 3010)
                 {
-                    Logger.Info($"HidHide installation process exited with code {process.ExitCode}");
+                    Logger.Info($"HidHide winget installation exited with code {result.ExitCode}");
                     return true;
                 }
 
-                Logger.Warn($"HidHide installation failed with exit code {process.ExitCode}");
-                return false;
-            }
-            catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
-            {
-                Logger.Info("HidHide installation cancelled by user (UAC prompt declined)");
+                Logger.Warn($"HidHide winget installation failed with exit code {result.ExitCode}");
                 return false;
             }
             catch (Exception ex)
             {
-                Logger.Warn($"HidHide installation exception: {ex.Message}");
+                Logger.Warn($"HidHide winget installation exception: {ex.Message}");
                 return false;
             }
         }
 
-        private static bool TryInstallViaDirectDownload()
+        private static bool TryInstallViaDirectDownload(out bool handedToUser)
         {
-            string tempPath = Path.Combine(Path.GetTempPath(), "HidHide_1.5.230_x64.exe");
+            handedToUser = false;
+            XboxGamingBarHelper.Services.SecureInstaller.HeldFile installer = null;
             try
             {
                 Logger.Info($"Downloading HidHide installer from {HidHideDirectDownloadUrl}...");
-                using (var client = new TimedWebClient(TimeSpan.FromSeconds(60)))
-                {
-                    client.Headers.Add("User-Agent", "GoTweaks/1.0");
-                    client.DownloadFile(HidHideDirectDownloadUrl, tempPath);
-                }
+                // Admin-only random folder, held deny-write, pinned SHA-256 (it used to be a
+                // fixed %TEMP% name any process of the user could swap before the elevated run).
+                installer = XboxGamingBarHelper.Services.SecureInstaller.DownloadAndVerifyAsync(
+                        new Uri(HidHideDirectDownloadUrl),
+                        host => XboxGamingBarHelper.Services.SecureInstaller.HostMatches(host, "github.com", "githubusercontent.com"),
+                        "HidHide_1.5.230_x64.exe",
+                        new XboxGamingBarHelper.Services.SecureInstaller.Expectation
+                        {
+                            Sha256 = HidHideDirectDownloadSha256,
+                            SignerNames = new[] { "Nefarius Software Solutions e.U." },
+                        },
+                        TimeSpan.FromSeconds(60))
+                    .GetAwaiter().GetResult();
 
-                Logger.Info($"HidHide installer downloaded to {tempPath}");
+                Logger.Info($"HidHide installer downloaded to {installer.Path} ({installer.Verdict}: {installer.Reason})");
 
-                var startInfo = new ProcessStartInfo
+                var run = XboxGamingBarHelper.Services.SecureInstaller.Run(installer, "/quiet /norestart", 120000);
+                if (!run.Started)
                 {
-                    FileName = tempPath,
-                    Arguments = "/quiet /norestart",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-
-                using Process process = Process.Start(startInfo);
-                if (process == null)
-                {
-                    Logger.Warn("Failed to start downloaded HidHide installer");
+                    Logger.Warn($"HidHide direct installer not started: {run.Message}");
                     return false;
                 }
 
-                Logger.Info($"HidHide direct installer started, PID={process.Id}");
-                if (!process.WaitForExit(120000))
+                if (!run.Elevated)
                 {
-                    try { process.Kill(); } catch { }
+                    // Handed to Windows for UAC confirmation; can't wait on it from here.
+                    Logger.Info($"HidHide direct installer: {run.Message}");
+                    XboxGamingBarHelper.Services.SecureInstaller.ReleaseLater(installer, TimeSpan.FromMinutes(10));
+                    installer = null;
+                    handedToUser = true;
+                    return false;
+                }
+
+                if (!run.Exited)
+                {
                     Logger.Warn("HidHide direct installation timed out after 2 minutes");
+                    XboxGamingBarHelper.Services.SecureInstaller.ReleaseLater(installer, TimeSpan.FromMinutes(10));
+                    installer = null;
                     return false;
                 }
 
-                if (process.ExitCode == 0 || process.ExitCode == 3010)
+                if (run.ExitCode == 0 || run.ExitCode == 3010)
                 {
-                    Logger.Info($"HidHide direct installer exited with code {process.ExitCode}");
+                    Logger.Info($"HidHide direct installer exited with code {run.ExitCode}");
                     return true;
                 }
 
-                Logger.Warn($"HidHide direct installer failed with exit code {process.ExitCode}");
-                return false;
-            }
-            catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
-            {
-                Logger.Info("HidHide direct installation cancelled by user (UAC prompt declined)");
+                Logger.Warn($"HidHide direct installer failed with exit code {run.ExitCode}");
                 return false;
             }
             catch (Exception ex)
@@ -190,11 +171,7 @@ namespace XboxGamingBarHelper.Labs
             }
             finally
             {
-                try
-                {
-                    if (File.Exists(tempPath)) File.Delete(tempPath);
-                }
-                catch { }
+                installer?.Dispose();
             }
         }
     }

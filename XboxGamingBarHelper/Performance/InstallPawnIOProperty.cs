@@ -40,86 +40,57 @@ namespace XboxGamingBarHelper.Performance
         }
 
         /// <summary>
-        /// Downloads and installs PawnIO with silent install and admin elevation.
+        /// Downloads and installs PawnIO. The installer is fetched into an admin-only random
+        /// folder (held deny-write) and only run silently with the helper's elevation when it
+        /// carries a valid Authenticode signature from namazso (the "latest" URL can't be
+        /// hash-pinned). Otherwise, or when the helper isn't elevated, Windows' UAC prompt
+        /// asks the user (it used to be a fixed %TEMP% file run elevated with no check).
         /// </summary>
         private void InstallPawnIO()
         {
-            string tempPath = Path.Combine(Path.GetTempPath(), "PawnIO_setup.exe");
-
+            Services.SecureInstaller.HeldFile installer = null;
             try
             {
                 // Step 1: Download the installer
                 Logger.Info($"Downloading PawnIO installer from {PawnIODownloadUrl}...");
+                installer = Services.SecureInstaller.DownloadAndVerifyAsync(
+                        new Uri(PawnIODownloadUrl),
+                        host => Services.SecureInstaller.HostMatches(host, "github.com", "githubusercontent.com"),
+                        "PawnIO_setup.exe",
+                        new Services.SecureInstaller.Expectation
+                        {
+                            SignerNames = new[] { "namazso.eu", "namazso" },
+                        },
+                        TimeSpan.FromSeconds(60))
+                    .GetAwaiter().GetResult();
 
-                // TimedWebClient (60s): stock WebClient has no timeout, so a
-                // firewall that drops outbound (issue #91) made this hang forever
-                // in the background — the widget's Install button looked dead.
-                using (var client = new TimedWebClient(TimeSpan.FromSeconds(60)))
-                {
-                    // Add user agent to avoid potential blocks
-                    client.Headers.Add("User-Agent", "GoTweaks/1.0");
-                    client.DownloadFile(PawnIODownloadUrl, tempPath);
-                }
+                Logger.Info($"PawnIO installer downloaded to {installer.Path} ({installer.Verdict}: {installer.Reason})");
 
-                Logger.Info($"PawnIO installer downloaded to {tempPath}");
-
-                // Step 2: Run installer with silent install.
-                // When the helper is elevated (normal case) launch it directly; when it runs
-                // non-elevated (ElevationBootstrapper's "continue anyway" fallbacks) a direct
-                // Process.Start fails with ERROR_ELEVATION_REQUIRED (740), so request elevation
-                // via ShellExecute + runas (shows UAC; cancel = 1223, handled below).
-                bool elevated = XboxGamingBarHelper.ElevationBootstrapper.IsRunningAsAdmin();
-                var startInfo = elevated
-                    ? new ProcessStartInfo
-                    {
-                        FileName = tempPath,
-                        Arguments = "-install -silent",
-                        UseShellExecute = false,
-                        CreateNoWindow = true
-                    }
-                    : new ProcessStartInfo
-                    {
-                        FileName = tempPath,
-                        Arguments = "-install -silent",
-                        UseShellExecute = true,
-                        Verb = "runas"
-                    };
-
+                // Step 2: Run installer with silent install (elevated only when verified).
                 Logger.Info("Launching PawnIO installer with -install -silent...");
-
-                using (var process = Process.Start(startInfo))
+                var run = Services.SecureInstaller.Run(installer, "-install -silent", 120000);
+                if (!run.Started)
                 {
-                    if (process != null)
-                    {
-                        Logger.Info($"PawnIO installer started with PID: {process.Id}");
-
-                        // Wait for up to 2 minutes for installation
-                        bool completed = process.WaitForExit(120000);
-
-                        if (completed)
-                        {
-                            Logger.Info($"PawnIO installation completed with exit code: {process.ExitCode}");
-                        }
-                        else
-                        {
-                            Logger.Warn("PawnIO installation timed out after 2 minutes");
-                            try { process.Kill(); } catch { }
-                        }
-                    }
-                    else
-                    {
-                        Logger.Warn("Failed to start PawnIO installer (UAC may have been cancelled)");
-                    }
+                    Logger.Warn($"Failed to start PawnIO installer: {run.Message}");
                 }
-            }
-            catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
-            {
-                // Error 1223 = ERROR_CANCELLED - User cancelled the UAC prompt
-                Logger.Info("PawnIO installation cancelled by user (UAC prompt declined)");
-            }
-            catch (WebException ex)
-            {
-                Logger.Error($"Failed to download PawnIO installer: {ex.Message}");
+                else if (run.Exited)
+                {
+                    Logger.Info($"PawnIO installation completed with exit code: {run.ExitCode}");
+                }
+                else if (run.Elevated)
+                {
+                    Logger.Warn("PawnIO installation timed out after 2 minutes");
+                }
+                else
+                {
+                    Logger.Info($"PawnIO installer handed to Windows for confirmation: {run.Message}");
+                }
+
+                if (run.Started && !run.Exited)
+                {
+                    Services.SecureInstaller.ReleaseLater(installer, TimeSpan.FromMinutes(10));
+                    installer = null;
+                }
             }
             catch (Exception ex)
             {
@@ -127,19 +98,8 @@ namespace XboxGamingBarHelper.Performance
             }
             finally
             {
-                // Step 3: Cleanup temp file
-                try
-                {
-                    if (File.Exists(tempPath))
-                    {
-                        File.Delete(tempPath);
-                        Logger.Info("Cleaned up temporary installer file");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Logger.Warn($"Failed to cleanup temp file: {ex.Message}");
-                }
+                // Step 3: Release / clean up the downloaded installer
+                installer?.Dispose();
 
                 // Step 4: Refresh the installed status
                 Logger.Info("Refreshing PawnIO installed status...");

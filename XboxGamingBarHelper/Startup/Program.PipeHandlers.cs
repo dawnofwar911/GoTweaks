@@ -106,18 +106,23 @@ namespace XboxGamingBarHelper
                 }
 
                 // Handle LaunchUrl request (for Donate button, etc.)
+                // Only absolute http(s) URLs (the widget only sends one https link), opened
+                // as the NON-elevated user via the shell: ShellExecute of an arbitrary string
+                // from this elevated process used to run any exe/path/protocol at High IL.
                 if (pipeMsg.Extra.TryGetValue("LaunchUrl", out object urlValue) && urlValue is string url)
                 {
                     try
                     {
                         Logger.Info($"Pipe: LaunchUrl request received: {url}");
-                        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                        if (!TryGetSafeLaunchUri(url, out string safeUrl))
                         {
-                            FileName = url,
-                            UseShellExecute = true
-                        });
-                        Logger.Info("Pipe: URL launched successfully");
-                        SendPipeAck(pipeMsg.RequestId);
+                            Logger.Warn($"Pipe: LaunchUrl refused (only absolute http/https URLs are allowed): {url}");
+                            SendPipeAck(pipeMsg.RequestId, false);
+                            return;
+                        }
+                        bool launched = Services.UnelevatedLauncher.ShellOpen(safeUrl);
+                        Logger.Info(launched ? "Pipe: URL launched successfully (non-elevated)" : "Pipe: URL could not be launched non-elevated");
+                        SendPipeAck(pipeMsg.RequestId, launched);
                     }
                     catch (Exception ex)
                     {
@@ -813,48 +818,47 @@ namespace XboxGamingBarHelper
                 }
 
                 // Handle upgrade helper request (UAC-free upgrade - preferred)
-                // The widget sends the MSIX source path so we can copy files after exit
+                // The widget sends the MSIX source path, but the elevated helper never copies
+                // from a client-supplied path: it looks the installed package up itself and
+                // only uses the pipe value for logging.
                 if (pipeMsg.Extra.ContainsKey("UpgradeHelper"))
                 {
-                    string msixSourcePath = pipeMsg.Extra["UpgradeHelper"]?.ToString();
-                    if (!string.IsNullOrEmpty(msixSourcePath))
+                    string requestedPath = pipeMsg.Extra["UpgradeHelper"]?.ToString();
+                    string msixSourcePath = Services.HelperDeploymentService.FindInstalledPackageHelperDirectory();
+                    Logger.Info($"Pipe: UpgradeHelper request received - requested source: {requestedPath ?? "(none)"}, installed package: {msixSourcePath ?? "(not found)"}");
+
+                    // Launch the upgrade script that copies files and restarts after we exit.
+                    // If it can't be started (no trusted package, downgrade, ...), keep running
+                    // and NACK: the widget falls back to ExitHelper + the normal bootstrap.
+                    if (string.IsNullOrEmpty(msixSourcePath) || !LaunchUpgradeScript(msixSourcePath, allowDowngrade: false))
                     {
-                        Logger.Info($"Pipe: UpgradeHelper request received - source: {msixSourcePath}");
-                        NotifyWidgetHelperExiting("UpgradeHelper");
-                        LogManager.Flush(); // Ensure log is written before we start shutdown
-                        SendPipeAck(pipeMsg.RequestId);
-
-                        // Launch upgrade script that will copy files and restart after we exit
-                        LaunchUpgradeScript(msixSourcePath);
-
-                        _isShuttingDown = true;
-
-                        // Schedule a forced exit
-                        _ = Task.Run(async () =>
-                        {
-                            await Task.Delay(2000); // Give main loop time to exit gracefully
-                            if (_isShuttingDown)
-                            {
-                                Logger.Info("Forcing exit for upgrade");
-                                LogManager.Flush(); // Ensure log is written before exit
-
-                                // Release mutex before exiting to ensure clean restart
-                                try
-                                {
-                                    singleInstanceMutex?.ReleaseMutex();
-                                    singleInstanceMutex?.Dispose();
-                                }
-                                catch { /* Ignore mutex errors during shutdown */ }
-
-                                Environment.Exit(0);
-                            }
-                        });
-                    }
-                    else
-                    {
-                        Logger.Warn("Pipe: UpgradeHelper request missing source path");
+                        Logger.Warn("Pipe: UpgradeHelper refused - helper keeps running");
                         SendPipeAck(pipeMsg.RequestId, false);
+                        return;
                     }
+
+                    NotifyWidgetHelperExiting("UpgradeHelper");
+                    LogManager.Flush(); // Ensure log is written before we start shutdown
+                    SendPipeAck(pipeMsg.RequestId);
+
+                    _isShuttingDown = true;
+
+                    // Schedule a forced exit
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(2000); // Give main loop time to exit gracefully
+                        if (_isShuttingDown)
+                        {
+                            Logger.Info("Forcing exit for upgrade");
+                            LogManager.Flush(); // Ensure log is written before exit
+
+                            // Don't ReleaseMutex here: this isn't the thread that acquired it (that always
+                            // threw and was swallowed). The kernel releases (abandons) it when the process
+                            // exits, and the next helper already handles AbandonedMutexException.
+
+                            Environment.Exit(0);
+                        }
+                    });
                     return;
                 }
 
@@ -1334,22 +1338,30 @@ namespace XboxGamingBarHelper
                         {
                             string msixbundlePath;
 
-                            // Check if this is a local msixbundle path (debug mode)
-                            if (updatePath.EndsWith(".msixbundle", StringComparison.OrdinalIgnoreCase) && File.Exists(updatePath))
+                            // Check if this is a local msixbundle path (debug mode). It is only
+                            // ever opened through the shell as the non-elevated user (App
+                            // Installer, per-user install), so the path itself grants nothing.
+                            if (updatePath.EndsWith(".msixbundle", StringComparison.OrdinalIgnoreCase)
+                                && Path.IsPathRooted(updatePath) && updatePath.IndexOf('"') < 0 && File.Exists(updatePath))
                             {
                                 // Direct path to local msixbundle - skip download/extract
                                 Logger.Info($"Pipe: [DEBUG] Using local msixbundle: {updatePath}");
-                                msixbundlePath = updatePath;
+                                msixbundlePath = Path.GetFullPath(updatePath);
                             }
                             else
                             {
-                                // Download and extract from URL
-                                var tempFolder = Path.Combine(Path.GetTempPath(), "GoTweaks_Update");
-                                var zipPath = Path.Combine(tempFolder, "update.zip");
+                                // Download and extract from URL: only GoTweaks release assets on
+                                // github.com, never an arbitrary URL from the pipe.
+                                if (!Uri.TryCreate(updatePath, UriKind.Absolute, out Uri updateUri)
+                                    || !Services.GoTweaksUpdateService.IsAllowedReleaseAssetUrl(updateUri))
+                                {
+                                    throw new InvalidOperationException("Update URL is not a GoTweaks GitHub release asset");
+                                }
 
-                                // Clean up and create temp folder
-                                if (Directory.Exists(tempFolder))
-                                    Directory.Delete(tempFolder, true);
+                                // Admin-only folder (Users may read: App Installer runs as the
+                                // user) with a random name, instead of a fixed %TEMP% folder.
+                                var tempFolder = Services.SecureInstaller.CreateDownloadFolder();
+                                var zipPath = Path.Combine(tempFolder, "update.zip");
                                 Directory.CreateDirectory(tempFolder);
 
                                 // Download the zip file. TimedWebClient (5 min — update
@@ -1359,7 +1371,7 @@ namespace XboxGamingBarHelper
                                 using (var client = new XboxGamingBarHelper.Core.TimedWebClient(TimeSpan.FromMinutes(5)))
                                 {
                                     client.Headers.Add("User-Agent", "GoTweaks/1.0");
-                                    client.DownloadFile(updatePath, zipPath);
+                                    client.DownloadFile(updateUri, zipPath);
                                 }
                                 Logger.Info($"Pipe: Downloaded to {zipPath}");
 
@@ -1394,7 +1406,17 @@ namespace XboxGamingBarHelper
 
                             Logger.Info($"Pipe: Found msixbundle: {msixbundlePath}");
 
-                            // Send response before launching installer
+                            // Launch the msixbundle installer (App Installer) as the NON-elevated
+                            // user. ShellExecute from this elevated process would resolve the
+                            // .msixbundle handler partly from HKCU\Software\Classes, which any
+                            // medium-integrity process can point at its own exe.
+                            Logger.Info("Pipe: Launching msixbundle installer (non-elevated)...");
+                            if (!Services.UnelevatedLauncher.ShellOpen(msixbundlePath))
+                            {
+                                throw new InvalidOperationException("Could not open the update package as the non-elevated user");
+                            }
+
+                            // Installer launched: tell the widget before we exit
                             response.Add("UpdateStatus", "Installing");
                             if (pipeServer != null && pipeServer.IsConnected)
                             {
@@ -1402,16 +1424,6 @@ namespace XboxGamingBarHelper
                                 successMsg.RequestId = request.RequestId;
                                 pipeServer.SendMessage(successMsg.ToJson());
                             }
-
-                            // Launch the msixbundle installer
-                            var startInfo = new ProcessStartInfo
-                            {
-                                FileName = msixbundlePath,
-                                UseShellExecute = true
-                            };
-
-                            Logger.Info("Pipe: Launching msixbundle installer...");
-                            var installerProcess = Process.Start(startInfo);
 
                             // Wait for installer to fully load the package before exiting
                             Logger.Info("Pipe: Waiting for installer to load package...");
@@ -1422,13 +1434,9 @@ namespace XboxGamingBarHelper
                             NotifyWidgetHelperExiting("UpdateInstall");
                             LogManager.Flush(); // Ensure log is written before exit
 
-                            // Release mutex before exiting to ensure clean restart
-                            try
-                            {
-                                singleInstanceMutex?.ReleaseMutex();
-                                singleInstanceMutex?.Dispose();
-                            }
-                            catch { /* Ignore mutex errors during shutdown */ }
+                            // Don't ReleaseMutex here: this isn't the thread that acquired it (that always
+                            // threw and was swallowed). The kernel releases (abandons) it when the process
+                            // exits, and the next helper already handles AbandonedMutexException.
 
                             Environment.Exit(0);
                             return; // Won't reach this but for clarity
@@ -2150,6 +2158,24 @@ namespace XboxGamingBarHelper
                 Logger.Debug($"ResolveAppPackagesProbeDir: {ex.Message}");
             }
             return null;
+        }
+
+        /// <summary>
+        /// Validates a URL a pipe client asked us to open: absolute, http or https only, no
+        /// credentials, no quotes or spaces. Returns the normalised (escaped) form, which is
+        /// what gets passed to the shell.
+        /// </summary>
+        internal static bool TryGetSafeLaunchUri(string candidate, out string safeUrl)
+        {
+            safeUrl = null;
+            if (string.IsNullOrWhiteSpace(candidate) || candidate.Length > 2048) return false;
+            if (!Uri.TryCreate(candidate.Trim(), UriKind.Absolute, out Uri uri)) return false;
+            if (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp) return false;
+            if (!string.IsNullOrEmpty(uri.UserInfo) || string.IsNullOrEmpty(uri.Host)) return false;
+            string normalised = uri.AbsoluteUri;
+            if (normalised.IndexOf('"') >= 0 || normalised.IndexOf(' ') >= 0) return false;
+            safeUrl = normalised;
+            return true;
         }
 
     }

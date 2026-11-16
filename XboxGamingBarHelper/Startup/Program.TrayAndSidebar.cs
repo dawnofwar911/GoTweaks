@@ -266,7 +266,13 @@ namespace XboxGamingBarHelper
                 }
 
                 string escapedExePath = currentExePath.Replace("'", "''");
-                string tempScriptPath = Path.Combine(Path.GetTempPath(), $"GoTweaksRestart_{currentPid}.ps1");
+                // The script runs with our (normally elevated) token: never from the
+                // user-writable %TEMP% under a predictable name, where a medium-integrity
+                // process could swap it before PowerShell reads it.
+                string scriptDir = ElevationBootstrapper.IsRunningAsAdmin()
+                    ? Services.HelperDeploymentService.EnsureAdminOnlyDirectory("Scripts", usersCanRead: false)
+                    : Path.GetTempPath();
+                string tempScriptPath = Path.Combine(scriptDir, $"GoTweaksRestart_{Guid.NewGuid():N}.ps1");
                 string script = $@"$pidToWait = {currentPid}
 $exePath = '{escapedExePath}'
 
@@ -288,8 +294,9 @@ Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction Silent
 
                 Process.Start(new ProcessStartInfo
                 {
-                    FileName = "powershell.exe",
+                    FileName = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
                     Arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{tempScriptPath}\"",
+                    WorkingDirectory = Environment.SystemDirectory,
                     UseShellExecute = false,
                     CreateNoWindow = true
                 });

@@ -427,8 +427,15 @@ namespace Shared.IPC
             if (value == null) return "null";
             if (value is string s) return $"\"{EscapeJson(s)}\"";
             if (value is bool b) return b ? "true" : "false";
-            if (value is int || value is long || value is double || value is float)
-                return value.ToString();
+            // Numbers are always written culture-invariant: value.ToString() gave "1,5" on
+            // comma-decimal locales (de-DE, fr-FR, ...), which is malformed JSON. NaN and
+            // Infinity have no JSON form, so they become null.
+            if (value is int || value is long)
+                return Convert.ToString(value, System.Globalization.CultureInfo.InvariantCulture);
+            if (value is double d)
+                return double.IsNaN(d) || double.IsInfinity(d) ? "null" : d.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+            if (value is float f)
+                return float.IsNaN(f) || float.IsInfinity(f) ? "null" : f.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
             return $"\"{EscapeJson(value.ToString())}\"";
         }
 

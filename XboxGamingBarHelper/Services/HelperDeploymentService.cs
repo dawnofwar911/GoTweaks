@@ -16,14 +16,328 @@ namespace XboxGamingBarHelper.Services
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
 
         /// <summary>
-        /// Stable folder for deployed helper files inside package LocalCache.
-        /// Uses the actual package path so scheduled tasks can find it.
-        /// Gets cleaned up automatically on package uninstall.
+        /// Package family name used when the process has no package identity (deployed
+        /// helper). Must match Package.appxmanifest's Identity (Name + Publisher CN=dg); the
+        /// same constant is used for LocalState paths throughout the helper.
+        /// </summary>
+        public const string FallbackPackageFamilyName = "PlayandBuildCustom.10365195AA1EC_8edemd50ez3gg";
+        private const string PackageNamePrefix = "PlayandBuildCustom.10365195AA1EC_";
+
+        /// <summary>
+        /// Folder the elevated scheduled task runs the helper from. It lives under
+        /// %ProgramFiles% (inherits Administrators/SYSTEM/TrustedInstaller full control,
+        /// Users read+execute) so that no medium-integrity process can replace the exe or
+        /// its DLLs and get silently elevated at the next logon / task run. Only an elevated
+        /// process (setup, or the running elevated helper's upgrade path) writes here.
         /// </summary>
         public static readonly string HelperFolder = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            "GoTweaks", "Helper"
+        );
+
+        /// <summary>
+        /// The pre-hardening deploy location (package LocalCache, user-writable). Now only a
+        /// staging copy: the non-elevated bootstrapper copies the package files here so the
+        /// UAC --setup can be launched from a plain filesystem path instead of WindowsApps
+        /// (elevating the WindowsApps exe directly wedged pre-Main, 2026-07-29). It is never
+        /// run by the scheduled task, and setup never copies FROM it (it copies from the
+        /// validated package folder passed with --source).
+        /// </summary>
+        public static readonly string StagingFolder = Path.Combine(
             GetPackageLocalCachePath(),
             "GoTweaks", "Helper"
         );
+
+        public static readonly string StagedExePath = Path.Combine(StagingFolder, "XboxGamingBarHelper.exe");
+
+        /// <summary>
+        /// True when HelperFolder (and its GoTweaks parent) are real directories under
+        /// Program Files, not reparse points redirecting writes elsewhere.
+        /// </summary>
+        public static bool IsHelperFolderAdminProtected
+        {
+            get
+            {
+                try
+                {
+                    string programFiles = Path.GetFullPath(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles)).TrimEnd('\\') + "\\";
+                    string full = Path.GetFullPath(HelperFolder);
+                    if (!full.StartsWith(programFiles, StringComparison.OrdinalIgnoreCase)) return false;
+                    foreach (var dir in new[] { Path.GetDirectoryName(full), full })
+                    {
+                        if (Directory.Exists(dir) && (File.GetAttributes(dir) & FileAttributes.ReparsePoint) != 0)
+                            return false;
+                    }
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+        }
+
+        // Owner SIDs Windows uses for the WindowsApps root on a non-system volume
+        // (apps moved / installed to another drive): TrustedInstaller and SYSTEM.
+        private const string TrustedInstallerSid = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+        private const string LocalSystemSid = "S-1-5-18";
+
+        /// <summary>
+        /// Splits a full path under a WindowsApps root into the part below that root.
+        /// %ProgramFiles%\WindowsApps is always accepted. &lt;drive&gt;:\WindowsApps (packages
+        /// installed to another volume) is accepted only when <paramref name="verifyOwner"/>
+        /// is false (lexical check) or its owner is TrustedInstaller/SYSTEM, since a
+        /// standard user can create a folder with that name on a secondary NTFS volume.
+        /// </summary>
+        private static bool TryGetWindowsAppsRelativePath(string fullPath, bool verifyOwner, out string relative)
+        {
+            relative = null;
+            if (string.IsNullOrEmpty(fullPath)) return false;
+
+            string programFilesWindowsApps = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "WindowsApps") + "\\";
+            if (fullPath.StartsWith(programFilesWindowsApps, StringComparison.OrdinalIgnoreCase))
+            {
+                relative = fullPath.Substring(programFilesWindowsApps.Length);
+                return true;
+            }
+
+            string root = Path.GetPathRoot(fullPath);
+            if (string.IsNullOrEmpty(root) || root.StartsWith("\\\\", StringComparison.Ordinal)) return false; // no UNC
+            string volumeWindowsApps = Path.Combine(root, "WindowsApps") + "\\";
+            if (!fullPath.StartsWith(volumeWindowsApps, StringComparison.OrdinalIgnoreCase)) return false;
+
+            if (verifyOwner)
+            {
+                try
+                {
+                    string dir = volumeWindowsApps.TrimEnd('\\');
+                    if ((File.GetAttributes(dir) & FileAttributes.ReparsePoint) != 0) return false;
+                    var owner = Directory.GetAccessControl(dir, System.Security.AccessControl.AccessControlSections.Owner)
+                        .GetOwner(typeof(System.Security.Principal.SecurityIdentifier));
+                    string ownerSid = owner?.Value ?? "";
+                    if (ownerSid != TrustedInstallerSid && ownerSid != LocalSystemSid)
+                    {
+                        Logger.Warn($"{dir} is not owned by TrustedInstaller/SYSTEM (owner {ownerSid}); not a trusted package root");
+                        return false;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn($"Could not verify owner of {volumeWindowsApps}: {ex.Message}");
+                    return false;
+                }
+            }
+
+            relative = fullPath.Substring(volumeWindowsApps.Length);
+            return true;
+        }
+
+        private static bool IsGoTweaksPackageRelativePath(string relative)
+        {
+            return !string.IsNullOrEmpty(relative)
+                && relative.StartsWith(PackageNamePrefix, StringComparison.OrdinalIgnoreCase)
+                && relative.IndexOf("..", StringComparison.Ordinal) < 0;
+        }
+
+        /// <summary>
+        /// True when <paramref name="dir"/> is a GoTweaks package folder (or a subfolder of
+        /// one) under a WindowsApps root (TrustedInstaller-owned, so its contents can't be
+        /// swapped by a medium-integrity process). Verifies the owner of a non-system-volume
+        /// WindowsApps root, so call it from the elevated side.
+        /// </summary>
+        public static bool IsTrustedPackageSourceDirectory(string dir)
+        {
+            if (string.IsNullOrEmpty(dir)) return false;
+            try
+            {
+                string full = Path.GetFullPath(dir).TrimEnd('\\');
+                return TryGetWindowsAppsRelativePath(full, verifyOwner: true, out string rest)
+                    && IsGoTweaksPackageRelativePath(rest);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Lexical-only variant of <see cref="IsTrustedPackageSourceDirectory"/> for the
+        /// non-elevated bootstrapper (which may not be allowed to read the owner of a
+        /// secondary-volume WindowsApps root). It only decides whether to pass --source;
+        /// the elevated setup re-validates with the owner check.
+        /// </summary>
+        public static bool LooksLikePackageSourceDirectory(string dir)
+        {
+            if (string.IsNullOrEmpty(dir)) return false;
+            try
+            {
+                string full = Path.GetFullPath(dir).TrimEnd('\\');
+                return TryGetWindowsAppsRelativePath(full, verifyOwner: false, out string rest)
+                    && IsGoTweaksPackageRelativePath(rest);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Package version parsed from a WindowsApps package folder name
+        /// (PlayandBuildCustom.10365195AA1EC_0.3.2796.0_x64__8edemd50ez3gg\...), or null.
+        /// Used when the deploying process has no package identity (e.g. the staged
+        /// --setup), where the assembly-version fallback (1.0.0.0) would poison .version.
+        /// </summary>
+        public static string GetPackageVersionFromPath(string dir)
+        {
+            if (!IsTrustedPackageSourceDirectory(dir)) return null;
+            try
+            {
+                string full = Path.GetFullPath(dir).TrimEnd('\\');
+                if (!TryGetWindowsAppsRelativePath(full, verifyOwner: false, out string rest)) return null;
+                string packageFolder = rest.Split('\\')[0];
+                string[] parts = packageFolder.Split('_');
+                if (parts.Length >= 2 && Version.TryParse(parts[1], out var v))
+                {
+                    return v.ToString();
+                }
+            }
+            catch
+            {
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Helper folder of the installed GoTweaks package for the current user, for
+        /// processes WITHOUT package identity (the Program Files / legacy LocalCache copy
+        /// started by the elevated scheduled task). Uses this process's own identity when
+        /// it has one, otherwise PackageManager (current user, no admin needed). Returns
+        /// null unless the result is a trusted WindowsApps package folder.
+        /// </summary>
+        public static string FindInstalledPackageHelperDirectory()
+        {
+            string candidate = null;
+            try
+            {
+                var package = global::Windows.ApplicationModel.Package.Current;
+                candidate = Path.Combine(package.InstalledLocation.Path, "XboxGamingBarHelper");
+            }
+            catch
+            {
+                candidate = null; // no package identity
+            }
+
+            if (candidate == null)
+            {
+                try
+                {
+                    var packageManager = new global::Windows.Management.Deployment.PackageManager();
+                    Version bestVersion = null;
+                    foreach (var package in packageManager.FindPackagesForUser(string.Empty, FallbackPackageFamilyName))
+                    {
+                        var pv = package.Id.Version;
+                        var version = new Version(pv.Major, pv.Minor, pv.Build, pv.Revision);
+                        if (bestVersion == null || version > bestVersion)
+                        {
+                            bestVersion = version;
+                            candidate = Path.Combine(package.InstalledLocation.Path, "XboxGamingBarHelper");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn($"FindInstalledPackageHelperDirectory: PackageManager lookup failed: {ex.Message}");
+                    candidate = null;
+                }
+            }
+
+            if (candidate == null)
+            {
+                return null;
+            }
+            if (!IsTrustedPackageSourceDirectory(candidate) || !File.Exists(Path.Combine(candidate, "XboxGamingBarHelper.exe")))
+            {
+                Logger.Warn($"FindInstalledPackageHelperDirectory: '{candidate}' is not a trusted GoTweaks package helper folder");
+                return null;
+            }
+            return candidate;
+        }
+
+        /// <summary>
+        /// True when the Program Files copy has every mandatory file (it may still be an
+        /// older version). Such a copy is admin-protected and can safely be elevated to
+        /// run --setup / a self-upgrade instead of the user-writable staged copy.
+        /// </summary>
+        public static bool IsDeployedCopyIntact()
+        {
+            try
+            {
+                return IsHelperFolderAdminProtected
+                    && MandatoryKeyFiles.All(f => File.Exists(Path.Combine(HelperFolder, f)));
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// %ProgramData%\GoTweaks\&lt;name&gt; with an explicit, non-inherited ACL: Administrators
+        /// and SYSTEM full control (owner Administrators), plus read/execute for Users when
+        /// <paramref name="usersCanRead"/> (needed when a non-elevated process must open a
+        /// file there, e.g. an installer launched through a visible UAC prompt). %ProgramData%
+        /// lets Users create and modify their own files, so the ACL is (re)applied on every
+        /// call and reparse points are refused. Requires elevation.
+        /// </summary>
+        public static string EnsureAdminOnlyDirectory(string name, bool usersCanRead)
+        {
+            string parent = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "GoTweaks");
+            string dir = Path.Combine(parent, name);
+
+            var admins = new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.BuiltinAdministratorsSid, null);
+            var system = new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.LocalSystemSid, null);
+            var users = new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.BuiltinUsersSid, null);
+            const System.Security.AccessControl.InheritanceFlags inherit =
+                System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit;
+
+            System.Security.AccessControl.DirectorySecurity BuildSecurity(bool allowUsersRead)
+            {
+                var security = new System.Security.AccessControl.DirectorySecurity();
+                security.SetAccessRuleProtection(true, false); // drop inherited ACEs (ProgramData lets Users create/modify)
+                foreach (var sid in new[] { admins, system })
+                {
+                    security.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                        sid, System.Security.AccessControl.FileSystemRights.FullControl, inherit,
+                        System.Security.AccessControl.PropagationFlags.None, System.Security.AccessControl.AccessControlType.Allow));
+                }
+                if (allowUsersRead)
+                {
+                    security.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                        users, System.Security.AccessControl.FileSystemRights.ReadAndExecute, inherit,
+                        System.Security.AccessControl.PropagationFlags.None, System.Security.AccessControl.AccessControlType.Allow));
+                }
+                security.SetOwner(admins);
+                return security;
+            }
+
+            foreach (var d in new[] { parent, dir })
+            {
+                if (Directory.Exists(d) && (File.GetAttributes(d) & FileAttributes.ReparsePoint) != 0)
+                {
+                    throw new IOException($"{d} is a reparse point; refusing to use it for elevated files");
+                }
+                // The parent only ever needs traverse/read for Users (subfolders carry their own ACL).
+                var security = BuildSecurity(allowUsersRead: d == parent || usersCanRead);
+                if (!Directory.Exists(d))
+                {
+                    Directory.CreateDirectory(d, security);
+                }
+                // Re-apply: takes ownership back from any user who pre-created the folder.
+                new DirectoryInfo(d).SetAccessControl(security);
+            }
+            return dir;
+        }
 
         /// <summary>
         /// Gets the actual package LocalCache path (not virtualized).
@@ -52,8 +366,12 @@ namespace XboxGamingBarHelper.Services
                     }
                 }
 
-                // Final fallback
-                return Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                // Final fallback: the package's LocalCache by its known family name (the
+                // deployed helper now runs from Program Files, so the exe path no longer
+                // tells us where the package data lives).
+                return Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "Packages", FallbackPackageFamilyName, "LocalCache");
             }
         }
 
@@ -351,50 +669,121 @@ namespace XboxGamingBarHelper.Services
         }
 
         /// <summary>
-        /// Deploys helper files from MSIX package to the stable LocalCache folder.
-        /// Overwrites existing files with retry logic for locked files.
-        /// Writes .version file on completion.
+        /// Deploys helper files from the MSIX package to the admin-only HelperFolder
+        /// (Program Files). Requires elevation. The source must be the installed package
+        /// folder under WindowsApps (or HelperFolder itself, a no-op); a user-writable source
+        /// is refused, so the elevated task can never be fed files a medium-integrity
+        /// process could have swapped. Writes .version on completion.
         /// </summary>
+        /// <param name="sourceOverride">Package helper folder passed to --setup with
+        /// --source (the staged setup exe has no package identity).</param>
         /// <returns>True if deployment succeeded</returns>
-        public static bool DeployHelper()
+        public static bool DeployHelper(string sourceOverride = null)
+        {
+            if (!ElevationBootstrapper.IsRunningAsAdmin())
+            {
+                Logger.Warn($"DeployHelper: not elevated; cannot write {HelperFolder}");
+                return false;
+            }
+
+            string sourceDir = sourceOverride;
+            if (string.IsNullOrEmpty(sourceDir) || !IsTrustedPackageSourceDirectory(sourceDir))
+            {
+                if (!string.IsNullOrEmpty(sourceDir))
+                {
+                    Logger.Warn($"DeployHelper: ignoring untrusted source override '{sourceDir}'");
+                }
+                sourceDir = GetSourceDirectory();
+                if (!IsTrustedPackageSourceDirectory(sourceDir))
+                {
+                    // No package identity (staged or Program Files copy run without a usable
+                    // --source): look the installed package up instead of trusting our own dir.
+                    string installed = FindInstalledPackageHelperDirectory();
+                    if (installed != null)
+                    {
+                        Logger.Info($"DeployHelper: using installed package folder {installed}");
+                        sourceDir = installed;
+                    }
+                }
+            }
+            if (!PathsAreSame(sourceDir, HelperFolder) && !IsTrustedPackageSourceDirectory(sourceDir))
+            {
+                Logger.Error($"DeployHelper: refusing untrusted source '{sourceDir}' (must be the GoTweaks package folder under WindowsApps)");
+                return false;
+            }
+
+            if (!IsHelperFolderAdminProtected)
+            {
+                Logger.Error($"DeployHelper: {HelperFolder} is not a plain Program Files directory (reparse point?) - refusing to deploy");
+                return false;
+            }
+
+            return DeployFiles(sourceDir, HelperFolder, stampVersion: true);
+        }
+
+        /// <summary>
+        /// Non-elevated: copies the package's helper files into the user-writable
+        /// StagingFolder so the UAC --setup can be launched from a plain path. The staged
+        /// copy is never run by the scheduled task.
+        /// </summary>
+        public static bool DeployToStaging()
+        {
+            return DeployFiles(GetSourceDirectory(), StagingFolder, stampVersion: false);
+        }
+
+        private static string ReadVersionFile(string path)
         {
             try
             {
-                var sourceDir = GetSourceDirectory();
+                if (File.Exists(path)) return File.ReadAllText(path).Trim();
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug($"Could not read version file {path}: {ex.Message}");
+            }
+            return null;
+        }
+
+        private static bool DeployFiles(string sourceDir, string targetFolder, bool stampVersion)
+        {
+            string targetExe = Path.Combine(targetFolder, "XboxGamingBarHelper.exe");
+            string targetVersionFile = Path.Combine(targetFolder, ".version");
+            try
+            {
                 if (string.IsNullOrEmpty(sourceDir) || !Directory.Exists(sourceDir))
                 {
                     Logger.Error($"Source directory not found: {sourceDir}");
                     return false;
                 }
 
-                Logger.Info($"Deploying helper from {sourceDir} to {HelperFolder}");
+                Logger.Info($"Deploying helper from {sourceDir} to {targetFolder}");
 
                 // CRITICAL: never deploy onto ourselves. When the *deployed* exe (the one
-                // already living in HelperFolder) is the process invoking a deploy/--setup,
-                // GetSourceDirectory() resolves to HelperFolder, making source == target.
+                // already living in targetFolder) is the process invoking a deploy/--setup,
+                // GetSourceDirectory() resolves to targetFolder, making source == target.
                 // CopyFileWithRetry deletes the target before copying, and with source==target
                 // that delete removes the only copy — then File.Copy fails with "Could not find
                 // file", permanently destroying the deployed install (observed 2026-05-26:
                 // 24/24 files lost, leaving only .old backups + a stale .version, which then
                 // makes IsDeploymentNeeded believe the install is fine forever → widget stuck
-                // on "Initial Setup in progress"). If we're already running from HelperFolder,
+                // on "Initial Setup in progress"). If we're already running from targetFolder,
                 // the files are by definition present — treat as a successful no-op.
-                if (PathsAreSame(sourceDir, HelperFolder))
+                if (PathsAreSame(sourceDir, targetFolder))
                 {
-                    Logger.Warn($"Deploy source equals deployed folder ({HelperFolder}); skipping self-copy (files already in place).");
+                    Logger.Warn($"Deploy source equals deployed folder ({targetFolder}); skipping self-copy (files already in place).");
 
                     // #97: if the files are in place but .version is missing/stale, this
                     // no-op path used to leave the mismatch in place forever. Re-stamp —
                     // but only with a real package-identity version; the assembly-version
                     // fallback (1.0.0.0) would poison the stamp and recreate the loop.
-                    if (File.Exists(DeployedExePath))
+                    if (File.Exists(targetExe))
                     {
                         var identityVersion = GetPackageVersionFromIdentity();
-                        if (identityVersion != null && GetDeployedVersion() != identityVersion)
+                        if (stampVersion && identityVersion != null && ReadVersionFile(targetVersionFile) != identityVersion)
                         {
                             try
                             {
-                                File.WriteAllText(VersionFilePath, identityVersion);
+                                File.WriteAllText(targetVersionFile, identityVersion);
                                 Logger.Info($"Version file re-stamped on self-copy no-op: {identityVersion}");
                             }
                             catch (Exception ex)
@@ -408,7 +797,28 @@ namespace XboxGamingBarHelper.Services
                 }
 
                 // Create target directory
-                Directory.CreateDirectory(HelperFolder);
+                Directory.CreateDirectory(targetFolder);
+
+                // Drop the stamp before touching any file: if this copy fails part-way the
+                // folder holds a mix of versions, and a missing stamp is what makes
+                // IsDeploymentNeeded (and the bootstrapper's choice of setup exe) treat it
+                // as incomplete instead of trusting the old stamp.
+                if (stampVersion)
+                {
+                    try { if (File.Exists(targetVersionFile)) File.Delete(targetVersionFile); }
+                    catch (Exception ex) { Logger.Debug($"Could not remove old version stamp: {ex.Message}"); }
+                }
+
+                // Best-effort sweep of "<file>.old.<id>" leftovers from earlier deploys that
+                // had to rename a locked (running) file out of the way.
+                try
+                {
+                    foreach (var stale in Directory.GetFiles(targetFolder, "*.old.*"))
+                    {
+                        try { File.Delete(stale); } catch { /* still locked: next deploy */ }
+                    }
+                }
+                catch { }
 
                 int successCount = 0;
                 int failCount = 0;
@@ -417,7 +827,7 @@ namespace XboxGamingBarHelper.Services
                 foreach (var fileName in RequiredFiles)
                 {
                     var sourcePath = Path.Combine(sourceDir, fileName);
-                    var targetPath = Path.Combine(HelperFolder, fileName);
+                    var targetPath = Path.Combine(targetFolder, fileName);
 
                     if (!File.Exists(sourcePath))
                     {
@@ -448,7 +858,7 @@ namespace XboxGamingBarHelper.Services
                         if (RequiredFiles.Contains(fileName, StringComparer.OrdinalIgnoreCase))
                             continue; // Already handled
 
-                        var targetPath = Path.Combine(HelperFolder, fileName);
+                        var targetPath = Path.Combine(targetFolder, fileName);
                         try
                         {
                             CopyFileWithRetry(dllPath, targetPath);
@@ -472,14 +882,26 @@ namespace XboxGamingBarHelper.Services
                 // blocked the self-healing redeploy path. With this guard, a broken deploy
                 // leaves no (or a stale-mismatched) version stamp, so IsDeploymentNeeded
                 // returns true next launch and we recover automatically.
-                bool deployOk = failCount == 0 && File.Exists(DeployedExePath);
-                if (deployOk)
+                bool deployOk = failCount == 0 && File.Exists(targetExe);
+                if (deployOk && stampVersion)
                 {
-                    var currentVersion = GetCurrentPackageVersion();
+                    // Stamp the version of the package the files actually came from (its
+                    // WindowsApps folder name), falling back to this process's identity. Never
+                    // the assembly-version fallback (1.0.0.0): that stamp never matches the
+                    // package version, so IsDeploymentNeeded would re-fire setup/UAC forever.
+                    var currentVersion = GetPackageVersionFromPath(sourceDir)
+                        ?? GetPackageVersionFromIdentity();
                     try
                     {
-                        File.WriteAllText(VersionFilePath, currentVersion);
-                        Logger.Info($"Version file written: {currentVersion}");
+                        if (currentVersion == null)
+                        {
+                            Logger.Warn($"Could not determine the package version of {sourceDir}; .version not written");
+                        }
+                        else
+                        {
+                            File.WriteAllText(targetVersionFile, currentVersion);
+                            Logger.Info($"Version file written: {currentVersion}");
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -488,7 +910,7 @@ namespace XboxGamingBarHelper.Services
                 }
                 else
                 {
-                    Logger.Warn($"Skipping .version stamp — deploy incomplete (failCount={failCount}, exePresent={File.Exists(DeployedExePath)}); next launch will retry.");
+                    Logger.Warn($"Skipping .version stamp — deploy incomplete (failCount={failCount}, exePresent={File.Exists(targetExe)}); next launch will retry.");
                 }
 
                 Logger.Info($"Deployment complete: {successCount} files copied, {failCount} failures");

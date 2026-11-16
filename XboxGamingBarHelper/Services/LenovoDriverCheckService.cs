@@ -154,9 +154,9 @@ namespace XboxGamingBarHelper.Services
 
             Logger.Info($"BatchInstallAsync: starting — {urls.Count} url(s)");
 
-            // Phase 1: parallel download (throttled to 4).
+            // Phase 1: parallel download + verification (throttled to 4).
             var downloadSemaphore = new SemaphoreSlim(4);
-            var localPaths = new string[urls.Count];
+            var files = new SecureInstaller.HeldFile[urls.Count];
             var downloadErrors = new string[urls.Count];
             var downloadTasks = new List<Task>();
             for (int i = 0; i < urls.Count; i++)
@@ -168,8 +168,8 @@ namespace XboxGamingBarHelper.Services
                     await downloadSemaphore.WaitAsync();
                     try
                     {
-                        var (path, err) = await DownloadToTempAsync(url);
-                        localPaths[idx] = path;
+                        var (file, err) = await DownloadVerifiedAsync(url);
+                        files[idx] = file;
                         downloadErrors[idx] = err;
                     }
                     finally { downloadSemaphore.Release(); }
@@ -177,33 +177,47 @@ namespace XboxGamingBarHelper.Services
             }
             await Task.WhenAll(downloadTasks);
 
-            int downloadedOk = localPaths.Count(p => !string.IsNullOrEmpty(p));
+            int downloadedOk = files.Count(f => f != null);
             Logger.Info($"BatchInstallAsync: downloaded {downloadedOk}/{urls.Count}");
 
-            // Phase 2: sequential launch.
+            // Phase 2: sequential launch. Verified (Lenovo-signed) installers run elevated;
+            // anything else goes through a visible UAC prompt; rejected ones don't run.
             int launched = 0;
-            for (int i = 0; i < localPaths.Length; i++)
+            for (int i = 0; i < files.Length; i++)
             {
-                string path = localPaths[i];
-                if (string.IsNullOrEmpty(path)) continue;
-                string ext = (System.IO.Path.GetExtension(path) ?? "").ToLowerInvariant();
-                if (ext != ".exe" && ext != ".msi") continue;
+                var file = files[i];
+                if (file == null) continue;
+                string ext = (System.IO.Path.GetExtension(file.Path) ?? "").ToLowerInvariant();
+                if (ext != ".exe" && ext != ".msi")
+                {
+                    file.Dispose();
+                    continue;
+                }
                 try
                 {
-                    var psi = new System.Diagnostics.ProcessStartInfo
+                    var run = SecureInstaller.Run(file, "", 0);
+                    if (run.Started)
                     {
-                        FileName = path,
-                        UseShellExecute = true,
-                    };
-                    System.Diagnostics.Process.Start(psi);
-                    launched++;
+                        launched++;
+                        // Keep the installer locked while it runs, then clean up.
+                        SecureInstaller.ReleaseLater(file, TimeSpan.FromMinutes(30));
+                        file = null;
+                    }
+                    else
+                    {
+                        Logger.Warn($"BatchInstallAsync: not launched {System.IO.Path.GetFileName(files[i].Path)} — {run.Message}");
+                    }
                     // Brief delay so successive installers don't race on the
                     // Windows Installer service mutex.
                     await Task.Delay(800);
                 }
                 catch (Exception ex)
                 {
-                    Logger.Warn($"BatchInstallAsync: launch failed for {path} — {ex.Message}");
+                    Logger.Warn($"BatchInstallAsync: launch failed for {files[i].Path} — {ex.Message}");
+                }
+                finally
+                {
+                    file?.Dispose();
                 }
             }
 
@@ -216,39 +230,52 @@ namespace XboxGamingBarHelper.Services
         }
 
         /// <summary>
-        /// Shared download helper used by both single-install and batch-install
-        /// paths. Returns (absolute file path, null) on success or (null, error
-        /// message) on failure. Host/scheme validation matches single install.
+        /// Lenovo-owned download host: exactly lenovo.com or a subdomain of it
+        /// (download.lenovo.com, pcsupport.lenovo.com). EndsWith("lenovo.com") used to
+        /// accept look-alikes such as evillenovo.com.
         /// </summary>
-        private static async Task<(string path, string error)> DownloadToTempAsync(string url)
+        private static bool IsLenovoHost(string host) => SecureInstaller.HostMatches(host, "lenovo.com");
+
+        // Leaf-signer CN/O values accepted for silent elevated installs. Anything else
+        // (e.g. an installer signed only by a component vendor) gets a visible UAC prompt.
+        private static readonly string[] LenovoSignerNames =
+        {
+            "Lenovo",
+            "Lenovo (Beijing) Limited",
+            "Lenovo (United States) Inc.",
+            "Lenovo PC HK Limited",
+        };
+
+        /// <summary>
+        /// Shared download helper used by both single-install and batch-install paths:
+        /// https + Lenovo host (re-checked after redirects), admin-only random folder, file
+        /// held deny-write, Authenticode verdict. A URL that the helper's own last driver
+        /// check didn't produce can never be run silently elevated (at most a UAC prompt).
+        /// Returns (file, null) on success or (null, error message) on failure.
+        /// </summary>
+        private static async Task<(SecureInstaller.HeldFile file, string error)> DownloadVerifiedAsync(string url)
         {
             if (string.IsNullOrWhiteSpace(url)) return (null, "Missing URL");
-            Uri uri;
-            try { uri = new Uri(url); }
-            catch { return (null, "Invalid URL"); }
-            if (uri.Scheme != "https") return (null, "Not https");
-            var host = uri.Host.ToLowerInvariant();
-            if (!host.EndsWith("lenovo.com")) return (null, "Host not allowed: " + host);
+            if (!Uri.TryCreate(url.Trim(), UriKind.Absolute, out Uri uri)) return (null, "Invalid URL");
+            if (uri.Scheme != Uri.UriSchemeHttps) return (null, "Only https URLs are accepted.");
+            if (!IsLenovoHost(uri.Host)) return (null, "Host not allowed: " + uri.Host);
 
-            string fileName = System.IO.Path.GetFileName(uri.LocalPath);
-            if (string.IsNullOrWhiteSpace(fileName)) fileName = "lenovo_installer";
-            foreach (var bad in System.IO.Path.GetInvalidFileNameChars())
-                fileName = fileName.Replace(bad, '_');
-
-            string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "GoTweaksLenovoInstallers");
-            try { System.IO.Directory.CreateDirectory(dir); }
-            catch (Exception ex) { return (null, "Temp dir: " + ex.Message); }
-
-            string target = System.IO.Path.Combine(dir, fileName);
+            string fileName = SecureInstaller.SanitizeFileName(System.IO.Path.GetFileName(uri.LocalPath), "lenovo_installer");
             try
             {
-                using var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
-                if (!response.IsSuccessStatusCode)
-                    return (null, "HTTP " + (int)response.StatusCode);
-                using (var src = await response.Content.ReadAsStreamAsync())
-                using (var dst = System.IO.File.Create(target))
-                    await src.CopyToAsync(dst);
-                return (target, null);
+                var file = await SecureInstaller.DownloadAndVerifyAsync(
+                    uri, IsLenovoHost, fileName,
+                    new SecureInstaller.Expectation { SignerNames = LenovoSignerNames },
+                    TimeSpan.FromMinutes(10));
+
+                bool fromOwnCheck = _lastResult?.Drivers != null
+                    && _lastResult.Drivers.Any(d => string.Equals(d?.DownloadUrl, url.Trim(), StringComparison.OrdinalIgnoreCase));
+                if (file.Verdict == SecureInstaller.Verdict.Verified && !fromOwnCheck)
+                {
+                    file.Verdict = SecureInstaller.Verdict.Unverified;
+                    file.Reason += "; URL not from the helper's own driver check";
+                }
+                return (file, null);
             }
             catch (Exception ex)
             {
@@ -257,104 +284,59 @@ namespace XboxGamingBarHelper.Services
         }
 
         /// <summary>
-        /// Downloads a Lenovo driver installer to a temp folder and launches
-        /// it. Returns a small JSON blob the widget can inspect (the caller
-        /// wraps it in a pipe response). The helper is elevated so launching
-        /// a Lenovo EXE here avoids a second UAC prompt for the user.
+        /// Downloads a Lenovo driver installer and launches it. Returns a small JSON blob
+        /// the widget can inspect (the caller wraps it in a pipe response).
         ///
         /// Security notes:
-        /// - URLs are accepted only if they're HTTPS on a Lenovo-owned host
-        ///   (download.lenovo.com / pcsupport.lenovo.com). Other hosts are
-        ///   rejected so this endpoint can't be abused as a general-purpose
-        ///   "download + run" primitive.
-        /// - The filename comes from the URL path only — no server-provided
-        ///   Content-Disposition is used. We sanitise it to disallow path
-        ///   separators before writing to the temp directory.
-        /// - Non-EXE payloads (readmes, zips, etc.) are still downloaded but
-        ///   only .exe / .msi files are launched automatically.
+        /// - URLs are accepted only if they're HTTPS on lenovo.com or a subdomain of it
+        ///   (exact host or "." + domain), checked again after redirects.
+        /// - The file goes to an admin-only %ProgramData%\GoTweaks\Downloads\&lt;random&gt;
+        ///   folder (name from the URL path only, sanitised) and stays open deny-write
+        ///   until the installer has been started.
+        /// - Only a valid Authenticode signature from Lenovo on a URL from the helper's own
+        ///   driver check runs silently elevated; anything else is handed to Windows with a
+        ///   visible UAC prompt; a tampered/revoked signature is not run.
+        /// - Non-EXE/MSI payloads (readmes, zips, etc.) are not kept or launched.
         /// </summary>
         public static async Task<string> InstallDriverAsync(string url)
         {
-            if (string.IsNullOrWhiteSpace(url))
-                return "{\"success\":false,\"message\":\"Missing download URL.\"}";
-
-            Uri uri;
-            try { uri = new Uri(url); }
-            catch { return "{\"success\":false,\"message\":\"Invalid URL.\"}"; }
-
-            if (uri.Scheme != "https")
-                return "{\"success\":false,\"message\":\"Only https URLs are accepted.\"}";
-            var host = uri.Host.ToLowerInvariant();
-            bool trusted = host.EndsWith("lenovo.com") || host.EndsWith("download.lenovo.com");
-            if (!trusted)
-                return "{\"success\":false,\"message\":\"Host not allowed: " + host + "\"}";
-
-            string fileName = System.IO.Path.GetFileName(uri.LocalPath);
-            if (string.IsNullOrWhiteSpace(fileName)) fileName = "lenovo_installer";
-            // Strip any path chars that managed to survive — GetFileName
-            // should have handled this, but belt-and-suspenders.
-            foreach (var bad in System.IO.Path.GetInvalidFileNameChars())
+            Logger.Info($"InstallDriverAsync: downloading {url}");
+            var (file, error) = await DownloadVerifiedAsync(url);
+            if (file == null)
             {
-                fileName = fileName.Replace(bad, '_');
+                Logger.Warn($"InstallDriverAsync: download failed — {error}");
+                return "{\"success\":false,\"message\":\"Download failed: " + (error ?? "").Replace("\\", "/").Replace("\"", "'") + "\"}";
             }
 
-            string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "GoTweaksLenovoInstallers");
-            try { System.IO.Directory.CreateDirectory(dir); }
-            catch (Exception ex)
+            string ext = (System.IO.Path.GetExtension(file.Path) ?? "").ToLowerInvariant();
+            if (ext != ".exe" && ext != ".msi")
             {
-                return "{\"success\":false,\"message\":\"Couldn't create temp dir: " + ex.Message.Replace("\"", "'") + "\"}";
-            }
-
-            string targetPath = System.IO.Path.Combine(dir, fileName);
-            Logger.Info($"InstallDriverAsync: downloading {url} -> {targetPath}");
-            try
-            {
-                using var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
-                if (!response.IsSuccessStatusCode)
-                {
-                    return "{\"success\":false,\"message\":\"HTTP " + (int)response.StatusCode + " from Lenovo CDN.\"}";
-                }
-                using (var src = await response.Content.ReadAsStreamAsync())
-                using (var dst = System.IO.File.Create(targetPath))
-                {
-                    await src.CopyToAsync(dst);
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Warn($"InstallDriverAsync: download failed — {ex.Message}");
-                return "{\"success\":false,\"message\":\"Download failed: " + ex.Message.Replace("\"", "'") + "\"}";
-            }
-
-            string ext = (System.IO.Path.GetExtension(targetPath) ?? "").ToLowerInvariant();
-            bool launchable = ext == ".exe" || ext == ".msi";
-            if (!launchable)
-            {
-                Logger.Info($"InstallDriverAsync: downloaded {fileName} but not launchable ({ext}), user must open manually.");
-                string safePath = targetPath.Replace("\\", "\\\\").Replace("\"", "'");
-                return "{\"success\":true,\"launched\":false,\"path\":\"" + safePath + "\",\"message\":\"Downloaded. Open the file manually to install.\"}";
+                Logger.Info($"InstallDriverAsync: downloaded {System.IO.Path.GetFileName(file.Path)} but it is not an installer ({ext}); discarded");
+                file.Dispose();
+                return "{\"success\":false,\"launched\":false,\"message\":\"Not an installer. Download it from the Lenovo driver page instead.\"}";
             }
 
             try
             {
-                // UseShellExecute lets the OS handle .msi via msiexec and .exe
-                // with its embedded manifest (which often requires admin — the
-                // helper already runs elevated, so the child inherits that).
-                var psi = new System.Diagnostics.ProcessStartInfo
+                var run = SecureInstaller.Run(file, "", 0);
+                if (!run.Started)
                 {
-                    FileName = targetPath,
-                    UseShellExecute = true,
-                };
-                System.Diagnostics.Process.Start(psi);
+                    Logger.Warn($"InstallDriverAsync: not launched — {run.Message}");
+                    file.Dispose();
+                    return "{\"success\":false,\"message\":\"" + run.Message.Replace("\\", "/").Replace("\"", "'") + "\"}";
+                }
+
+                // Keep the installer locked while it runs, then clean up.
+                SecureInstaller.ReleaseLater(file, TimeSpan.FromMinutes(30));
+                Logger.Info($"InstallDriverAsync: launched {System.IO.Path.GetFileName(file.Path)} (elevated={run.Elevated})");
+                return "{\"success\":true,\"launched\":true,\"message\":\"" + run.Message.Replace("\\", "/").Replace("\"", "'") + "\"}";
             }
             catch (Exception ex)
             {
+                file.Dispose();
                 Logger.Warn($"InstallDriverAsync: launch failed — {ex.Message}");
-                return "{\"success\":false,\"message\":\"Launch failed: " + ex.Message.Replace("\"", "'") + "\"}";
+                return "{\"success\":false,\"message\":\"Launch failed: " + ex.Message.Replace("\\", "/").Replace("\"", "'") + "\"}";
             }
-
-            Logger.Info($"InstallDriverAsync: launched {fileName}");
-            return "{\"success\":true,\"launched\":true,\"message\":\"Installer launched.\"}";
         }
 
         /// <summary>Reads Lenovo-specific WMI fields: machine type, model, BIOS version.</summary>
