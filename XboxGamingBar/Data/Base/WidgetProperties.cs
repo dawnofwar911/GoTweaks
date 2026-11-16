@@ -23,6 +23,29 @@ namespace XboxGamingBar.Data
         /// </summary>
         public async Task Sync()
         {
+            System.Threading.Interlocked.Increment(ref syncsInProgress);
+            try
+            {
+                await SyncCore();
+            }
+            finally
+            {
+                System.Threading.Interlocked.Decrement(ref syncsInProgress);
+            }
+        }
+
+        // Number of Sync() calls currently running (batch NotReady retries can last 45 s).
+        private int syncsInProgress;
+
+        /// <summary>
+        /// True while a Sync() is running. The HelperManagersReady handler uses this to avoid
+        /// starting a second, unguarded sync alongside the startup sync, whose NotReady retry
+        /// loop will pick up the now-ready helper by itself.
+        /// </summary>
+        public bool IsSyncInProgress => System.Threading.Volatile.Read(ref syncsInProgress) > 0;
+
+        private async Task SyncCore()
+        {
             var syncTimer = Stopwatch.StartNew();
 
             // Try batch sync first
@@ -43,7 +66,16 @@ namespace XboxGamingBar.Data
 
             if (batchResult == BatchSyncResult.NotReady)
             {
-                Logger.Warn("Batch sync: Helper is still initializing managers; skipping individual fallback to avoid uninitialized property states");
+                // Don't pull possibly-uninitialized values one by one, but never leave the UI
+                // dead either: ~66 controls start IsEnabled=False and are only enabled by a
+                // completed sync. Enable them with their current values; the helper's
+                // HelperManagersReady broadcast triggers a full sync once it is ready.
+                Logger.Warn("Batch sync: Helper is still initializing managers; skipping individual fallback, enabling controls with current values until HelperManagersReady");
+                foreach (var property in properties.Values)
+                {
+                    try { await property.OnBatchSyncCompleted(); }
+                    catch (Exception ex) { Logger.Warn($"OnBatchSyncCompleted after NotReady threw: {ex.Message}"); }
+                }
                 return;
             }
 

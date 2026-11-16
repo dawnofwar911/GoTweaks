@@ -233,7 +233,76 @@ namespace XboxGamingBarHelper.Labs
         // Input-mode pill state (see Function.LegionControllerInputMode): raw values from
         // GET_FEATURE responses parsed in the read loop, display value pushed via the
         // static event so Program can route it into LegionManager's property.
-        private byte _lastGamepadMode = 0;   // 1=xinput 2=dinput
+        private byte _lastGamepadMode = 0;   // 1=xinput 2=dinput (effective, see TryUpdateGamepadModeFromReply)
+        // Latest 03/0E reply per target for the current connection (0 = no reply yet).
+        private byte _modeReplyReceiver = 0;
+        private byte _modeReplyLeft = 0;
+        private byte _modeReplyRight = 0;
+        private byte _modeReplyUnknownTarget = 0;
+        // True once a battery/dock frame has been parsed, so _lastLeftDocked/_lastRightDocked
+        // reflect hardware instead of their "undocked" defaults.
+        private volatile bool _dockStateKnown = false;
+        // Set per connect in ReplayLegionSpaceInit; cleared once the auto-restore decision ran.
+        private volatile bool _autoRestoreArmed = false;
+
+        private void ResetGamepadModeReplies()
+        {
+            _modeReplyReceiver = 0;
+            _modeReplyLeft = 0;
+            _modeReplyRight = 0;
+            _modeReplyUnknownTarget = 0;
+            _lastGamepadMode = 0;
+        }
+
+        /// <summary>
+        /// Records a 03/0E gamepad-mode reply from <paramref name="target"/> and recomputes the
+        /// effective mode: receiver (global) when detached, left half when docked, falling back
+        /// to whichever target answered. Returns true when the effective mode changed.
+        /// </summary>
+        private bool TryUpdateGamepadModeFromReply(byte target, byte mode, out byte effective)
+        {
+            if (target == LEGION_RECEIVER_GLOBAL_ID) _modeReplyReceiver = mode;
+            else if (target == LEGION_CONTROLLER_LEFT_ID) _modeReplyLeft = mode;
+            else if (target == LEGION_CONTROLLER_RIGHT_ID) _modeReplyRight = mode;
+            else _modeReplyUnknownTarget = mode; // firmware that doesn't echo the target id
+
+            bool detached = isDetachedMode || _detectedPid == 0x61ED || _detectedPid == 0x61EC || !_lastLeftDocked || !_lastRightDocked;
+            byte[] order = detached
+                ? new[] { _modeReplyReceiver, _modeReplyLeft, _modeReplyRight, _modeReplyUnknownTarget }
+                : new[] { _modeReplyLeft, _modeReplyRight, _modeReplyReceiver, _modeReplyUnknownTarget };
+            effective = 0;
+            foreach (byte m in order)
+            {
+                if (m >= 1 && m <= 4) { effective = m; break; }
+            }
+            if (effective == 0 || effective == _lastGamepadMode) return false;
+            _lastGamepadMode = effective;
+            return true;
+        }
+
+        /// <summary>
+        /// Once per connect: when docked (dock state known) with a mode reply from THIS
+        /// connection showing D-Input while the user's preferred mode is XInput, switch back.
+        /// </summary>
+        private void TryAutoRestorePreferredMode()
+        {
+            if (!_autoRestoreArmed || !_dockStateKnown || _lastGamepadMode == 0) return;
+            _autoRestoreArmed = false;
+            try
+            {
+                int preferredMode = Devices.Libraries.Legion.LegionGamepadModeSelectProperty.GetPreferredMode();
+                bool isDetached = _detectedPid == 0x61ED || _detectedPid == 0x61EC || !_lastLeftDocked || !_lastRightDocked;
+                if (!isDetached && preferredMode == 1 && (_lastGamepadMode == 2 || _lastGamepadMode == 3))
+                {
+                    Logger.Info($"LegionButtonMonitor: Connected docked in PID 0x{_detectedPid:X4} (mode={_lastGamepadMode}), restoring preferred XInput mode");
+                    ApplyGamepadMode(1);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"LegionButtonMonitor: Auto-restore preferred mode failed: {ex.Message}");
+            }
+        }
         private byte _lastFpsSwitch = 0;     // 1=gamepad 2=fps
         private int _lastReportedInputMode = 0;
         private string _lastMcuFirmware = "";
@@ -2557,20 +2626,13 @@ namespace XboxGamingBarHelper.Labs
                 // When docked in PID 0x61EB, if the controller was in DInput (mode=2), restore XInput.
                 // When detached, the wireless receiver (0x61ED/0x61EC) does not support hardware XInput switching;
                 // detached XInput is seamlessly handled via software bridging in VIIPER.
-                try
-                {
-                    int preferredMode = Devices.Libraries.Legion.LegionGamepadModeSelectProperty.GetPreferredMode();
-                    bool isDetached = _detectedPid == 0x61ED || _detectedPid == 0x61EC || !_lastLeftDocked || !_lastRightDocked;
-                    if (!isDetached && preferredMode == 1 && (_lastGamepadMode == 2 || _lastGamepadMode == 3))
-                    {
-                        Logger.Info($"LegionButtonMonitor: Connected docked in PID 0x{_detectedPid:X4} (mode={_lastGamepadMode}), restoring preferred XInput mode");
-                        ApplyGamepadMode(1);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Logger.Warn($"LegionButtonMonitor: Auto-restore preferred mode failed: {ex.Message}");
-                }
+                // The decision needs THIS connection's mode reply and a known dock state, so it
+                // is armed here and evaluated from the 03/0E reply handler and the dock-state
+                // update (TryAutoRestorePreferredMode), never from the previous session's
+                // cached mode (which caused re-enumeration loops) or the default "undocked"
+                // flags on first connect.
+                ResetGamepadModeReplies();
+                _autoRestoreArmed = true;
 
                 Logger.Info($"LegionButtonMonitor: Wrote XInput coexistence registers ({ok}/{total}, xinput={(!_physicalXInputSuppressed ? "ON" : "SUPPRESSED (emu)")})");
             }
@@ -3409,8 +3471,17 @@ namespace XboxGamingBarHelper.Labs
                                 {
                                     if (buffer[3] == 0x0E)
                                     {
-                                        _lastGamepadMode = buffer[5];
-                                        try { GamepadModeRawUpdated?.Invoke(buffer[5]); } catch { }
+                                        // QueryInputMode asks the receiver (0x00), left (0x03) and
+                                        // right (0x04); their replies can differ (receiver reports
+                                        // D-Input when detached, an unsupported target may echo 0).
+                                        // Keep one value per target and publish a single effective
+                                        // mode, so the property/pill doesn't flap and each reply
+                                        // doesn't re-trigger NotifyDockStateChanged.
+                                        if (TryUpdateGamepadModeFromReply(buffer[4], buffer[5], out byte effectiveMode))
+                                        {
+                                            try { GamepadModeRawUpdated?.Invoke(effectiveMode); } catch { }
+                                        }
+                                        TryAutoRestorePreferredMode();
                                     }
                                     else if (buffer[3] == 0x0B) _lastFpsSwitch = buffer[5];
                                     else if (buffer[3] == 0x0F)
@@ -3550,7 +3621,9 @@ namespace XboxGamingBarHelper.Labs
                                         _lastRightConnected = rightConnected;
                                         _lastLeftDocked = leftDocked;
                                         _lastRightDocked = rightDocked;
+                                        _dockStateKnown = true;
                                         _lastBatteryUpdateTime = DateTime.Now;
+                                        TryAutoRestorePreferredMode();
 
                                         Logger.Debug($"LegionButtonMonitor: Battery update L={leftBattery}% (conn={leftConnected}, docked={leftDocked}) R={rightBattery}% (conn={rightConnected}, docked={rightDocked})");
                                         try
@@ -4568,7 +4641,7 @@ namespace XboxGamingBarHelper.Labs
                 {
                     case LegionButtonAction.XboxGuide:
                         // Check if Steam UI (Big Picture) or a Steam game is active. If so,
-                        // handle the Guide press by emitting Steam's overlay/menu shortcut (Ctrl+1 / Shift+Tab)
+                        // handle the Guide press by emitting Steam's overlay/menu shortcut (F1 / Shift+Tab)
                         // and suppress the raw virtual Xbox Guide pulse. On Windows, emitting a raw
                         // Guide button on an Xbox controller causes the OS Game Bar service to capture
                         // the button and steal focus from Steam.
@@ -4699,10 +4772,12 @@ namespace XboxGamingBarHelper.Labs
         }
 
         /// <summary>
-        /// When Steam or a Steam game is active, emit the appropriate shortcut (Shift+Tab for
-        /// in-game overlay, Ctrl+1 for Steam Big Picture menu) and suppress the raw virtual Xbox Guide
-        /// pulse. When Controller Emulation is OFF, handles desktop Guide actions via Big Picture focus
-        /// or Game Bar fallback. Returns true if handled.
+        /// Guide-button keyboard heuristics. With Guide mode "GameBar" fires Win+G. With
+        /// Controller Emulation ON and Guide mode "Native" (the default) it does nothing and
+        /// returns false, so the emulated Guide press reaches the game / Steam Input exactly
+        /// as the user chose. Only when emulation is OFF (no virtual pad can deliver Guide)
+        /// does it emit Steam's shortcuts (Shift+Tab in a Steam game, F1 when the Steam
+        /// client / Big Picture is foreground) or fall back to Win+G. Returns true if handled.
         /// </summary>
         private static bool TryHandleSteamGuideOverlay()
         {
@@ -4714,6 +4789,18 @@ namespace XboxGamingBarHelper.Labs
                     Logger.Info("LegionButtonMonitor: GuideMode=GameBar — firing Win+G");
                     Program.SendKeyboardShortcut("Win+G");
                     return true;
+                }
+
+                // Respect the user's Guide mode: with Controller Emulation ON and Guide mode
+                // Native (or unset, which defaults to Native) the emulated pad delivers Guide.
+                // Previously the foreground-game checks below ran first and always replaced the
+                // Guide press with Win+G / Shift+Tab while any game was in the foreground.
+                bool emulationOn = Program.ControllerEmulationManager?.EmulationEnabled ?? false;
+                bool nativeMode = string.IsNullOrEmpty(guideMode)
+                    || string.Equals(guideMode, "Native", StringComparison.OrdinalIgnoreCase);
+                if (emulationOn && nativeMode)
+                {
+                    return false;
                 }
 
                 // 1. Check for active/foreground game via SystemManager

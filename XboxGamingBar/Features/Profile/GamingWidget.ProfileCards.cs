@@ -120,12 +120,25 @@ namespace XboxGamingBar
         /// </summary>
         internal void SyncProfilesFromHelperXmls()
         {
+            // Recovery path only: run at most once per widget session, and only when the
+            // local profile store has been wiped (no Profile_Game_* containers at all).
+            // Running it on every listing / game switch resurrected profiles the user had
+            // just deleted, because the helper deletes profiles/<exe>.xml asynchronously.
+            if (profileXmlImportChecked) return;
+            profileXmlImportChecked = true;
+
             try
             {
+                var settings = ApplicationData.Current.LocalSettings;
+                if (settings.Containers.Keys.Any(k => k.StartsWith("Profile_Game_", StringComparison.Ordinal)))
+                {
+                    Logger.Debug("SyncProfilesFromHelperXmls: local game profiles present, skipping XML import");
+                    return;
+                }
+
                 string profilesFolder = Path.Combine(ApplicationData.Current.LocalFolder.Path, "profiles");
                 if (!Directory.Exists(profilesFolder)) return;
 
-                var settings = ApplicationData.Current.LocalSettings;
                 var xmlFiles = Directory.GetFiles(profilesFolder, "*.xml");
                 if (xmlFiles.Length == 0) return;
 
@@ -157,13 +170,13 @@ namespace XboxGamingBar
                         {
                             titlesToSeed.Add(rawTitle.Replace('\\', '_').Replace('/', '_'));
                         }
-                        if (fileBasename.Equals("SWZeroCompany", StringComparison.OrdinalIgnoreCase))
+
+                        // Never re-import a profile the user deleted (the helper may not have
+                        // removed its XML yet, or was disconnected when the delete happened).
+                        if (IsGameProfileTombstoned(fileBasename) || titlesToSeed.Any(IsGameProfileTombstoned))
                         {
-                            titlesToSeed.Add("STAR WARS Zero CompanyT");
-                        }
-                        else if (fileBasename.Equals("gen1recomp", StringComparison.OrdinalIgnoreCase))
-                        {
-                            titlesToSeed.Add("C:");
+                            Logger.Debug($"SyncProfilesFromHelperXmls: skipping deleted profile {Path.GetFileName(xmlPath)}");
+                            continue;
                         }
 
                         // Check if containers already exist for any alias of this profile
@@ -278,7 +291,9 @@ namespace XboxGamingBar
                                 string pg = GetXmlVal(doc, "LegionButtonPage");
                                 if (!string.IsNullOrEmpty(pg)) ctrlCont.Values["ButtonPage"] = pg;
                                 string lb = GetXmlVal(doc, "LegionLightBrightness");
-                                if (!string.IsNullOrEmpty(lb) && double.TryParse(lb, out double pLb)) ctrlCont.Values["Brightness"] = pLb;
+                                // LoadControllerProfileFromStorage reads "LightBrightness" as int.
+                                if (!string.IsNullOrEmpty(lb) && double.TryParse(lb, System.Globalization.NumberStyles.Any, System.Globalization.CultureInfo.InvariantCulture, out double pLb))
+                                    ctrlCont.Values["LightBrightness"] = (int)Math.Round(pLb);
                                 if (!string.IsNullOrEmpty(fullPath)) ctrlCont.Values["GameExePath"] = fullPath;
                             }
                         }
@@ -301,6 +316,51 @@ namespace XboxGamingBar
             {
                 Logger.Error($"SyncProfilesFromHelperXmls failed: {ex.Message}");
             }
+        }
+
+        // Set once SyncProfilesFromHelperXmls has evaluated the one-shot import this session.
+        private bool profileXmlImportChecked;
+
+        private const string DeletedGameProfilesContainer = "DeletedGameProfiles";
+
+        /// <summary>
+        /// Records that the user deleted the profile for <paramref name="gameName"/> so the
+        /// XML recovery import never brings it back.
+        /// </summary>
+        internal static void TombstoneGameProfile(string gameName)
+        {
+            if (string.IsNullOrWhiteSpace(gameName)) return;
+            try
+            {
+                var settings = ApplicationData.Current.LocalSettings;
+                var cont = settings.CreateContainer(DeletedGameProfilesContainer, ApplicationDataCreateDisposition.Always);
+                cont.Values[gameName.Trim()] = DateTime.UtcNow.Ticks;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"TombstoneGameProfile({gameName}) failed: {ex.Message}");
+            }
+        }
+
+        internal static bool IsGameProfileTombstoned(string gameName)
+        {
+            if (string.IsNullOrWhiteSpace(gameName)) return false;
+            try
+            {
+                var settings = ApplicationData.Current.LocalSettings;
+                if (!settings.Containers.TryGetValue(DeletedGameProfilesContainer, out var cont) || cont == null)
+                    return false;
+                string key = gameName.Trim();
+                foreach (var k in cont.Values.Keys)
+                {
+                    if (string.Equals(k, key, StringComparison.OrdinalIgnoreCase)) return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug($"IsGameProfileTombstoned({gameName}) failed: {ex.Message}");
+            }
+            return false;
         }
 
         private List<string> GetAllSavedGameProfiles()

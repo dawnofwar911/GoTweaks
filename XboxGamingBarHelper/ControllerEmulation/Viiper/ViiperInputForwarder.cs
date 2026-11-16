@@ -91,6 +91,8 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
         private volatile bool paused;
 
         private uint physicalIndex;
+        // Throttle for re-running DetectPhysicalXInputIndex while physicalIndex is unresolved.
+        private long lastPhysicalRedetectTicks;
         private uint busId;
         private uint deviceId;
         // Set when the target topology requires two libviiper devices on the
@@ -810,35 +812,98 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
             }
         }
 
-        /// <summary>Discover which XInput index (0-3) has a connected physical controller.</summary>
-        public static uint DetectPhysicalXInputIndex()
+        /// <summary>
+        /// Discover which XInput index (0-3) has a connected physical controller.
+        /// Preference order:
+        ///   1. a Legion pad (VID 0x17EF / 0x1A86);
+        ///   2. the first slot with a known non-Microsoft VID (ROG Ally, MSI Claw, ...);
+        ///   3. the first slot whose capabilities probe failed (unknown, not provably ours);
+        ///   4. a Microsoft-VID (0x045E) slot, only when it cannot be our own virtual pad:
+        ///      the virtual target is not xbox360 (DS4/DualSense/Joy-Con never occupy an
+        ///      XInput slot), or more than one 045E slot exists (GPD-style physical X360
+        ///      pads; the physical one enumerated first, so take the lowest).
+        /// Returns uint.MaxValue when nothing suitable is connected; the forwarder's
+        /// XInput loop re-runs detection periodically while the index is unresolved.
+        /// </summary>
+        /// <param name="virtualTargetType">The VIIPER device type currently emulated
+        /// ("xbox360", "dualsense", ...), or null when unknown (treated as xbox360).</param>
+        public static uint DetectPhysicalXInputIndex(string virtualTargetType = null, bool quiet = false)
         {
             var state = new ViiperXInputState();
-            uint pick = uint.MaxValue;
-            bool picked = false;
             var connected = new System.Collections.Generic.List<uint>();
+            var summary = new System.Text.StringBuilder();
+            uint legionSlot = uint.MaxValue;
+            uint otherVendorSlot = uint.MaxValue;
+            uint unknownSlot = uint.MaxValue;
+            var microsoftSlots = new System.Collections.Generic.List<uint>();
+            bool capsUnavailable = false;
+
             for (uint i = 0; i < 4; i++)
             {
-                if (ViiperXInput.GetState(i, ref state) == ViiperXInput.ErrorSuccess)
+                if (ViiperXInput.GetState(i, ref state) != ViiperXInput.ErrorSuccess) continue;
+                connected.Add(i);
+
+                var caps = new ViiperXInputCapabilitiesEx();
+                uint rc;
+                try
                 {
-                    connected.Add(i);
-                    var caps = new ViiperXInputCapabilitiesEx();
-                    uint rc = ViiperXInput.GetCapabilitiesEx(1, i, 1, ref caps);
-                    if (rc == ViiperXInput.ErrorSuccess)
-                    {
-                        // Match physical handheld controllers (Legion Go VID: 0x17EF, WinCHIPhead VID: 0x1A86).
-                        // Specifically exclude Microsoft VID (0x045E) which is the VIIPER virtual controller.
-                        if (!picked && (caps.VendorId == 0x17EF || caps.VendorId == 0x1A86))
-                        {
-                            pick = i;
-                            picked = true;
-                        }
-                    }
+                    rc = ViiperXInput.GetCapabilitiesEx(1, i, 1, ref caps);
+                }
+                catch (Exception ex)
+                {
+                    // Hidden ordinal #108 missing (EntryPointNotFound) or similar: never let
+                    // the probe abort StartLocked.
+                    if (!capsUnavailable && !quiet)
+                        Logger.Warn($"DetectPhysicalXInputIndex: XInputGetCapabilitiesEx threw on slot {i}: {ex.Message}");
+                    capsUnavailable = true;
+                    rc = uint.MaxValue;
+                }
+
+                if (rc != ViiperXInput.ErrorSuccess)
+                {
+                    if (summary.Length > 0) summary.Append(", ");
+                    summary.Append($"slot{i}=?");
+                    if (unknownSlot == uint.MaxValue) unknownSlot = i;
+                    continue;
+                }
+
+                if (summary.Length > 0) summary.Append(", ");
+                summary.Append($"slot{i}={caps.VendorId:X4}:{caps.ProductId:X4}");
+
+                if (caps.VendorId == 0x17EF || caps.VendorId == 0x1A86)
+                {
+                    if (legionSlot == uint.MaxValue) legionSlot = i;
+                }
+                else if (caps.VendorId == 0x045E)
+                {
+                    microsoftSlots.Add(i);
+                }
+                else
+                {
+                    if (otherVendorSlot == uint.MaxValue) otherVendorSlot = i;
                 }
             }
-            string slots = connected.Count == 0 ? "(none)" : string.Join(",", connected);
-            Logger.Info($"DetectPhysicalXInputIndex: connectedSlots=[{slots}], picked={(picked ? pick.ToString() : "none (physical not connected to XInput)")}");
-            return picked ? pick : uint.MaxValue;
+
+            bool virtualIsXInput = string.IsNullOrEmpty(virtualTargetType)
+                || string.Equals(virtualTargetType, "xbox360", StringComparison.OrdinalIgnoreCase);
+
+            uint pick = uint.MaxValue;
+            string why = "none (physical not connected to XInput)";
+            if (legionSlot != uint.MaxValue) { pick = legionSlot; why = "legion"; }
+            else if (otherVendorSlot != uint.MaxValue) { pick = otherVendorSlot; why = "non-Microsoft vendor"; }
+            else if (unknownSlot != uint.MaxValue) { pick = unknownSlot; why = "caps unknown"; }
+            else if (microsoftSlots.Count > 0 && (!virtualIsXInput || microsoftSlots.Count > 1))
+            {
+                pick = microsoftSlots[0];
+                why = virtualIsXInput ? "lowest of several 045E slots" : "045E (virtual target is not XInput)";
+            }
+
+            if (!quiet || pick != uint.MaxValue)
+            {
+                string slots = connected.Count == 0 ? "(none)" : string.Join(",", connected);
+                Logger.Info($"DetectPhysicalXInputIndex: connectedSlots=[{slots}] [{summary}], target={virtualTargetType ?? "?"}, picked={(pick != uint.MaxValue ? pick.ToString() : "none")} ({why})");
+            }
+            return pick;
         }
 
         public void Start(uint inPhysicalIndex, uint inBusId, uint inDeviceId, string inTargetType)
@@ -1914,6 +1979,20 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
                     {
                         if (physicalIndex >= 4)
                         {
+                            // No physical slot resolved yet (pad not enumerated at Start,
+                            // HidHide cycle-port, resume, late plug-in). Re-probe about once
+                            // a second instead of sleeping here forever.
+                            long nowTicks = DateTime.UtcNow.Ticks;
+                            if (nowTicks - lastPhysicalRedetectTicks >= TimeSpan.TicksPerSecond)
+                            {
+                                lastPhysicalRedetectTicks = nowTicks;
+                                try
+                                {
+                                    uint redetected = DetectPhysicalXInputIndex(targetType, quiet: true);
+                                    if (redetected < 4) UpdatePhysicalIndex(redetected);
+                                }
+                                catch (Exception ex) { Logger.Debug($"XInput re-detect threw: {ex.Message}"); }
+                            }
                             Thread.Sleep(16);
                             continue;
                         }

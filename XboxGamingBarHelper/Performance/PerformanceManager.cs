@@ -290,6 +290,49 @@ namespace XboxGamingBarHelper.Performance
         public int CurrentSPPT { get; private set; }
         public int CurrentFPPT { get; private set; }
 
+        // UTC ticks of the last time CurrentSPL/SPPT/FPPT were filled from a REAL hardware
+        // readback (Legion WMI). 0 = no trustworthy readback (never read, values only echo a
+        // request, or invalidated by resume). Used by the Sticky-TDP ReapplyTDP short-circuit.
+        private long lastHardwareTdpReadUtcTicks;
+        private const int HardwareTdpReadMaxAgeMs = 2500;
+
+        private void MarkHardwareTdpRead()
+        {
+            System.Threading.Interlocked.Exchange(ref lastHardwareTdpReadUtcTicks, DateTime.UtcNow.Ticks);
+        }
+
+        /// <summary>
+        /// Forget the last hardware TDP readback (e.g. after resume, when firmware may have
+        /// reset the limits), so the next ReapplyTDP always writes to hardware.
+        /// </summary>
+        public void InvalidateHardwareTdpReadback()
+        {
+            System.Threading.Interlocked.Exchange(ref lastHardwareTdpReadUtcTicks, 0L);
+        }
+
+        /// <summary>
+        /// True only when a fresh, real hardware readback shows SPL, SPPT and FPPT all at the
+        /// values SetTDP(targetTdp) would write (TDP Boost included). Non-Legion PawnIO
+        /// devices have no readback path, so this is always false there.
+        /// </summary>
+        public bool IsHardwareTdpConfirmed(int targetTdp)
+        {
+            if (targetTdp <= 0) return false;
+            long readTicks = System.Threading.Interlocked.Read(ref lastHardwareTdpReadUtcTicks);
+            if (readTicks <= 0) return false;
+            if ((DateTime.UtcNow.Ticks - readTicks) > TimeSpan.FromMilliseconds(HardwareTdpReadMaxAgeMs).Ticks) return false;
+
+            int expectedSpl = targetTdp;
+            int expectedSppt = targetTdp;
+            int expectedFppt = targetTdp;
+            if (tdpBoostEnabled?.Value == true)
+            {
+                expectedSppt = targetTdp + (tdpBoostSPPT?.Value ?? 1);
+                expectedFppt = targetTdp + (tdpBoostFPPT?.Value ?? 3);
+            }
+            return CurrentSPL == expectedSpl && CurrentSPPT == expectedSppt && CurrentFPPT == expectedFppt;
+        }
+
         // Flag to indicate AutoTDP is managing TDP - when true, widget TDP updates are ignored
         public bool IsAutoTDPActive { get; set; }
 
@@ -1478,7 +1521,9 @@ namespace XboxGamingBarHelper.Performance
                                     return;
                                 }
                                 // No independent read-back path on non-Legion hardware —
-                                // assume the requested values took effect.
+                                // assume the requested values took effect. These are NOT a
+                                // hardware readback, so don't let Sticky TDP trust them.
+                                InvalidateHardwareTdpReadback();
                                 CurrentSPL = spl;
                                 CurrentSPPT = sppt;
                                 CurrentFPPT = fppt;
@@ -1573,6 +1618,7 @@ namespace XboxGamingBarHelper.Performance
                     CurrentSPL = slow.Value;
                     CurrentSPPT = fast.Value;
                     CurrentFPPT = peak.Value;
+                    MarkHardwareTdpRead();
 
                     var newTdpString = $"SPL:{slow}W SPPT:{fast}W FPPT:{peak}W";
                     if (newTdpString != lastTdpString)
@@ -1744,6 +1790,7 @@ namespace XboxGamingBarHelper.Performance
                         CurrentSPL = slow.Value;
                         CurrentSPPT = fast.Value;
                         CurrentFPPT = peak.Value;
+                        MarkHardwareTdpRead();
 
                         var newTdpString = $"SPL:{slow}W SPPL:{fast}W FPPT:{peak}W";
                         Logger.Debug($"UpdateCurrentTDP (Legion WMI): Read values - {newTdpString}");

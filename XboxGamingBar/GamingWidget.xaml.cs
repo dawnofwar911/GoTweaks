@@ -1078,6 +1078,9 @@ namespace XboxGamingBar
         private readonly FPSLimitProperty fpsLimit;
         private DispatcherTimer fpsLimitDebounceTimer;
         private int fpsLimitPendingValue;
+        // True when the pending debounced FPS change came from a programmatic apply
+        // (DGP apply/restore, profile load/switch) and must not be saved to a profile.
+        private bool fpsLimitPendingSaveSuppressed;
         private const int FPS_LIMIT_DEBOUNCE_MS = 300;
 
         // Profile management

@@ -2128,8 +2128,7 @@ namespace XboxGamingBar
                 // currentProfileName still points to the game profile (SwitchProfile hasn't run yet).
                 // Without this check, the global mode gets saved to the game profile, corrupting it.
                 bool isGameProfile = currentProfileName?.StartsWith("Game_") == true;
-                bool isDgpActive = defaultGameProfileEnabled?.Value == true;
-                if (isGameProfile && perGameProfile?.Value != true && !isDgpActive)
+                if (isGameProfile && perGameProfile?.Value != true)
                 {
                     Logger.Warn($"TDP Mode save skipped: per-game profile is disabled but currentProfileName is still '{currentProfileName}' (game closing)");
                 }

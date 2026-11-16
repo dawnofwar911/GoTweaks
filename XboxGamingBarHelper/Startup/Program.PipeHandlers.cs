@@ -741,9 +741,14 @@ namespace XboxGamingBarHelper
                                 else if (targetObj is string tStr && int.TryParse(tStr, out int parsedTdp) && parsedTdp > 0) targetTdp = parsedTdp;
                             }
 
-                            if (performanceManager.CurrentSPL == targetTdp && performanceManager.CurrentSPL > 0)
+                            // Skip only when a fresh, real hardware readback (Legion WMI) shows
+                            // SPL, SPPT and FPPT all at the target. CurrentSPL alone was stale
+                            // (2 s poll, Custom mode only), ignored SPPT/FPPT drift, and on
+                            // non-Legion PawnIO devices only echoed the last request, so Sticky
+                            // TDP never re-applied after an EC/firmware reset or resume.
+                            if (performanceManager.IsHardwareTdpConfirmed(targetTdp))
                             {
-                                Logger.Debug($"Pipe: ReapplyTDP skipped — hardware already confirmed at {targetTdp}W");
+                                Logger.Debug($"Pipe: ReapplyTDP skipped — fresh hardware readback confirms {targetTdp}W (SPL/SPPT/FPPT)");
                                 SendPipeAck(pipeMsg.RequestId);
                                 return;
                             }
@@ -892,7 +897,7 @@ namespace XboxGamingBarHelper
                     response = new global::Windows.Foundation.Collections.ValueSet();
                     response.Add(nameof(Function), functionValue);
                     response.Add("Content", status);
-                    response.Add("UpdatedTime", DateTimeOffset.Now.ToUnixTimeMilliseconds());
+                    response.Add("UpdatedTime", DateTime.Now.Ticks);
                     Logger.Info($"Pipe: Labs DAService status = {status}");
                 }
                 // Labs: DAService Control request (Start/Stop)
@@ -909,7 +914,7 @@ namespace XboxGamingBarHelper
                         response = new global::Windows.Foundation.Collections.ValueSet();
                         response.Add(nameof(Function), (int)Function.Labs_DAServiceStatus);
                         response.Add("Content", status);
-                        response.Add("UpdatedTime", DateTimeOffset.Now.ToUnixTimeMilliseconds());
+                        response.Add("UpdatedTime", DateTime.Now.Ticks);
                         Logger.Info($"Pipe: Labs DAService control action={action}, new status={status}");
                     }
                 }
@@ -1156,7 +1161,7 @@ namespace XboxGamingBarHelper
                     response = new global::Windows.Foundation.Collections.ValueSet();
                     response.Add(nameof(Function), functionValue);
                     response.Add("Content", installed);
-                    response.Add("UpdatedTime", DateTimeOffset.Now.ToUnixTimeMilliseconds());
+                    response.Add("UpdatedTime", DateTime.Now.Ticks);
                     Logger.Info($"Pipe: HidHide installed status: {installed}");
                 }
                 // HidHide: Install request - only install when explicitly requested with Set command and "install" content
@@ -1451,7 +1456,7 @@ namespace XboxGamingBarHelper
                         string result = Services.SystemRestoreService.PrepareForUninstall(legionManager, systemManager, viiperEmulationManager);
                         response.Add(nameof(Function), functionValue);
                         response.Add("Content", result);
-                        response.Add("UpdatedTime", DateTimeOffset.Now.ToUnixTimeMilliseconds());
+                        response.Add("UpdatedTime", DateTime.Now.Ticks);
                         Logger.Info("Pipe: PrepareForUninstall completed successfully");
                     }
                     catch (Exception ex)
@@ -1467,7 +1472,7 @@ namespace XboxGamingBarHelper
                     string status = Services.SystemRestoreService.GetSavedValuesStatus();
                     response.Add(nameof(Function), functionValue);
                     response.Add("Content", status);
-                    response.Add("UpdatedTime", DateTimeOffset.Now.ToUnixTimeMilliseconds());
+                    response.Add("UpdatedTime", DateTime.Now.Ticks);
                     Logger.Info($"Pipe: SystemRestoreStatus requested");
                 }
                 // Export All Data (comprehensive backup)
@@ -1483,7 +1488,7 @@ namespace XboxGamingBarHelper
                         string exportPath = ExportAllData(widgetSettings);
                         response.Add(nameof(Function), functionValue);
                         response.Add("Content", exportPath);
-                        response.Add("UpdatedTime", DateTimeOffset.Now.ToUnixTimeMilliseconds());
+                        response.Add("UpdatedTime", DateTime.Now.Ticks);
                         Logger.Info($"Pipe: ExportAllData completed: {exportPath}");
                     }
                     catch (Exception ex)
@@ -1514,7 +1519,7 @@ namespace XboxGamingBarHelper
                             {
                                 response.Add("WidgetSettings", widgetSettings);
                             }
-                            response.Add("UpdatedTime", DateTimeOffset.Now.ToUnixTimeMilliseconds());
+                            response.Add("UpdatedTime", DateTime.Now.Ticks);
                             Logger.Info($"Pipe: ImportAllData completed from {importPath}");
                         }
                     }

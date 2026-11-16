@@ -1091,6 +1091,11 @@ namespace XboxGamingBar
             {
                 int limit = (int)e.NewValue;
                 fpsLimitPendingValue = limit;
+                // Capture whether this change is programmatic (DGP apply/restore, profile
+                // load/switch). The debounce tick fires after those flags are cleared, so
+                // checking them at tick time let a DGP apply save its values into a profile.
+                fpsLimitPendingSaveSuppressed = isApplyingDefaultProfile || isRestoringFromDefaultProfile
+                    || isLoadingProfile || isSwitchingProfile;
 
                 // Initialize debounce timer if needed
                 if (fpsLimitDebounceTimer == null)
@@ -1119,7 +1124,9 @@ namespace XboxGamingBar
                 Logger.Info($"FPS Limit changed (debounced): {fpsLimitPendingValue}");
 
                 // Save to profile if FPS Limit saving is enabled
-                if (SaveFPSLimit && !isLoadingProfile && !isSwitchingProfile && !isRestoringFromDefaultProfile && !isApplyingDefaultProfile)
+                bool saveSuppressed = fpsLimitPendingSaveSuppressed;
+                fpsLimitPendingSaveSuppressed = false;
+                if (SaveFPSLimit && !saveSuppressed && !isLoadingProfile && !isSwitchingProfile && !isRestoringFromDefaultProfile && !isApplyingDefaultProfile)
                 {
                     SaveCurrentSettingsToProfile(currentProfileName);
                 }

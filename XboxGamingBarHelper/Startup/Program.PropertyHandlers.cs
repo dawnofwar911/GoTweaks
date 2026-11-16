@@ -68,6 +68,10 @@ namespace XboxGamingBarHelper
             // Force refresh hardware sensors (battery values can be stale after hibernation)
             performanceManager?.ForceRefreshHardware();
 
+            // Firmware may reset TDP limits across sleep: never let Sticky TDP's ReapplyTDP
+            // short-circuit on a pre-sleep readback.
+            performanceManager?.InvalidateHardwareTdpReadback();
+
             // Rebuild the EC fan override path if the PawnIO handle died during
             // sleep — otherwise the custom fan curve silently stops applying
             // until three tick-level write failures trigger the self-heal.

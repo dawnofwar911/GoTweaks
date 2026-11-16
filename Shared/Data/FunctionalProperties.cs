@@ -150,10 +150,9 @@ namespace Shared.Data
                             {
                                 updatedTime = Convert.ToInt64(timeObj);
                             }
-                            if (updatedTime <= 0 || updatedTime < property.UpdatedTime)
-                            {
-                                updatedTime = DateTime.Now.Ticks;
-                            }
+                            // Do NOT coerce stale or zero UpdatedTime to "now": GenericProperty.SetValue
+                            // deliberately rejects older/zero-time Sets so an out-of-order snapshot can't
+                            // clobber a newer value (issue #79). Senders must stamp DateTime.Now.Ticks.
                             property.SetValue(content, updatedTime);
                         }
                     }
