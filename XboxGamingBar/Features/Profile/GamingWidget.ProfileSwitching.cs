@@ -176,12 +176,22 @@ namespace XboxGamingBar
             }
 
             // Option A: When Default Game Profile is active, user fine-tuning adjustments are saved
-            // specifically to the per-game profile (Game_<gameName>), keeping Global untouched!
+            // to the game's per-game profile (Game_<gameName>) ONLY if the user already has one,
+            // keeping Global untouched. Never create a per-game profile from here: doing so made
+            // any DGP tweak (and the DGP apply itself, via the FPS debounce) silently create a
+            // Game_ profile, which then auto-enabled the per-game toggle and shadowed DGP for
+            // that game from then on. Without a per-game profile the tweak stays a session-only
+            // adjustment on top of the Default Game Profile (upstream behaviour).
             if (defaultGameProfileEnabled?.Value == true)
             {
+                if (HasValidGame(currentGameName) && !HasAnyGameProfile(currentGameName))
+                {
+                    Logger.Debug($"Default Game Profile active and no per-game profile for '{currentGameName}' - not creating one; skipping save");
+                    return;
+                }
+
                 if (HasValidGame(currentGameName))
                 {
-                    LoadOrCreateGameProfiles();
                     bool perGamePowerSourceSplit = GetPerGamePowerSourceProfileEnabled(currentGameName);
                     if (perGamePowerSourceSplit)
                     {
