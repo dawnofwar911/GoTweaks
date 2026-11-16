@@ -63,14 +63,27 @@ namespace XboxGamingBarHelper.Performance
 
                 Logger.Info($"PawnIO installer downloaded to {tempPath}");
 
-                // Step 2: Run installer with silent install
-                var startInfo = new ProcessStartInfo
-                {
-                    FileName = tempPath,
-                    Arguments = "-install -silent",
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
+                // Step 2: Run installer with silent install.
+                // When the helper is elevated (normal case) launch it directly; when it runs
+                // non-elevated (ElevationBootstrapper's "continue anyway" fallbacks) a direct
+                // Process.Start fails with ERROR_ELEVATION_REQUIRED (740), so request elevation
+                // via ShellExecute + runas (shows UAC; cancel = 1223, handled below).
+                bool elevated = XboxGamingBarHelper.ElevationBootstrapper.IsRunningAsAdmin();
+                var startInfo = elevated
+                    ? new ProcessStartInfo
+                    {
+                        FileName = tempPath,
+                        Arguments = "-install -silent",
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    }
+                    : new ProcessStartInfo
+                    {
+                        FileName = tempPath,
+                        Arguments = "-install -silent",
+                        UseShellExecute = true,
+                        Verb = "runas"
+                    };
 
                 Logger.Info("Launching PawnIO installer with -install -silent...");
 
