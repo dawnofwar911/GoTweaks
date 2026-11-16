@@ -186,7 +186,28 @@ namespace XboxGamingBarHelper.LosslessScaling
         // Two-way sync: watch Settings.xml for external edits from the LS GUI
         private FileSystemWatcher settingsWatcher;
         private System.Threading.Timer settingsWatcherDebounceTimer;
-        private bool isInternalSettingsWrite = false;
+        // Number of our own Settings.xml writes whose watcher events may still be pending.
+        // A counter (not a bool) so overlapping writes don't clear each other's window early.
+        private int internalSettingsWriteDepth = 0;
+        // SHA-256 of the Settings.xml content we last wrote; a watcher event whose file content
+        // still matches it is our own write arriving late, not an external LS GUI edit.
+        private string lastWrittenSettingsHash;
+
+        private static string ComputeFileHash(string path)
+        {
+            try
+            {
+                using (var sha = System.Security.Cryptography.SHA256.Create())
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                {
+                    return BitConverter.ToString(sha.ComputeHash(fs));
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
 
         public LosslessScalingManager() : base()
         {
@@ -1087,7 +1108,7 @@ namespace XboxGamingBarHelper.LosslessScaling
 
         private void WriteSettingsToProfile(string profileName)
         {
-            lock (stateLock) { isInternalSettingsWrite = true; }
+            lock (stateLock) { internalSettingsWriteDepth++; }
             try
             {
                 if (!File.Exists(SETTINGS_PATH))
@@ -1173,6 +1194,8 @@ namespace XboxGamingBarHelper.LosslessScaling
                 SetElementValue(profile, "MaxFrameLatency", losslessScalingMaxFrameLatency.Value.ToString());
 
                 doc.Save(SETTINGS_PATH);
+                string writtenHash = ComputeFileHash(SETTINGS_PATH);
+                lock (stateLock) { lastWrittenSettingsHash = writtenHash; }
                 Logger.Info($"Settings written to profile '{profileName}'");
             }
             catch (Exception ex)
@@ -1183,7 +1206,10 @@ namespace XboxGamingBarHelper.LosslessScaling
             {
                 Task.Delay(1000).ContinueWith(_ =>
                 {
-                    lock (stateLock) { isInternalSettingsWrite = false; }
+                    lock (stateLock)
+                    {
+                        if (internalSettingsWriteDepth > 0) internalSettingsWriteDepth--;
+                    }
                 });
             }
         }
@@ -1487,7 +1513,7 @@ namespace XboxGamingBarHelper.LosslessScaling
         {
             lock (stateLock)
             {
-                if (isInternalSettingsWrite)
+                if (internalSettingsWriteDepth > 0)
                     return;
 
                 // Debounce multiple rapid file events (500ms)
@@ -1511,11 +1537,21 @@ namespace XboxGamingBarHelper.LosslessScaling
             try
             {
                 string profileToRead;
+                string ownHash;
                 lock (stateLock)
                 {
-                    if (isInternalSettingsWrite)
+                    if (internalSettingsWriteDepth > 0)
                         return;
                     profileToRead = currentProfileName;
+                    ownHash = lastWrittenSettingsHash;
+                }
+
+                // Our own write delivered after the suppression window: the file content is
+                // exactly what we wrote, so there's nothing external to reload.
+                if (ownHash != null && string.Equals(ComputeFileHash(SETTINGS_PATH), ownHash, StringComparison.Ordinal))
+                {
+                    Logger.Debug("Settings.xml change matches our last write; skipping reload");
+                    return;
                 }
 
                 Logger.Info($"Settings.xml modified externally. Reloading profile '{profileToRead}'...");
