@@ -13,9 +13,11 @@ namespace XboxGamingBarHelper
     /// Handles self-elevation via scheduled task to avoid repeated UAC prompts.
     ///
     /// Architecture:
-    /// - Helper files are deployed to %LocalAppData%\GoTweaks\Helper\ (stable location)
+    /// - Helper files are deployed to %ProgramFiles%\GoTweaks\Helper\ (admin-only, stable
+    ///   location; was the user-writable package LocalCache before the security hardening)
     /// - Scheduled task points to the deployed location (survives MSIX updates)
-    /// - First run or update: UAC prompt once to deploy and create task
+    /// - First run (and the one-time migration off LocalCache): UAC prompt once to deploy
+    ///   and create/repoint the task
     /// - Subsequent launches: task runs without UAC
     /// </summary>
     public static class ElevationBootstrapper
@@ -45,8 +47,10 @@ namespace XboxGamingBarHelper
         // file records when we last fired a UAC setup; within the cooldown we refuse
         // to fire another. Lives in the deploy folder so uninstall sweeps it.
         private const int SetupLaunchCooldownSeconds = 120;
+        // Written by the NON-elevated bootstrapper, so it must live in the user-writable
+        // staging folder (HelperFolder is admin-only now). It's only a throttle.
         private static readonly string SetupLaunchMarkerPath =
-            Path.Combine(HelperDeploymentService.HelperFolder, ".setup_launch");
+            Path.Combine(HelperDeploymentService.StagingFolder, ".setup_launch");
 
         /// <summary>
         /// Ensures the helper is running with admin privileges.
@@ -74,6 +78,13 @@ namespace XboxGamingBarHelper
                     if (HelperDeploymentService.IsRunningFromMsix())
                     {
                         EnsureDeploymentAsync();
+                    }
+                    else if (!HelperDeploymentService.IsRunningFromDeployedLocation())
+                    {
+                        // Pre-hardening install: the logon task still runs the helper from the
+                        // user-writable LocalCache copy. We're elevated, so move it to Program
+                        // Files and repoint the task now; the next start runs from there.
+                        MigrateLegacyDeploymentAsync(exePath);
                     }
 
                     return true; // Continue with normal execution immediately
@@ -105,24 +116,28 @@ namespace XboxGamingBarHelper
                 // elevate the freshly-DEPLOYED exe instead of the WindowsApps one — the
                 // elevated-from-WindowsApps launch is the combination that spun pre-Main
                 // at 100% CPU and wedged the "Initial setup" banner.
+                // Security hardening: the deployed helper now lives in an admin-only folder
+                // (Program Files) because the elevated logon task used to run it from the
+                // user-writable LocalCache, a silent UAC bypass. A non-elevated bootstrap can
+                // therefore no longer refresh it. Instead, stage the package files in the
+                // old LocalCache location (user-writable) so the UAC --setup below can be
+                // launched from a plain filesystem path rather than from WindowsApps (the
+                // combination that wedged pre-Main, 2026-07-29). The elevated setup copies
+                // from the validated package folder (--source), never from the staging copy.
+                // Routine updates while the elevated helper is running still need no UAC:
+                // the widget's UpgradeHelper path has the running (elevated) helper do it.
+                bool stagedOk = false;
                 if (deploymentNeeded)
                 {
-                    Logger.Info("Deploying helper files from bootstrap (no elevation — target is user-writable)...");
+                    Logger.Info($"Deployment needed - staging helper files in {HelperDeploymentService.StagingFolder} for the elevated setup...");
                     try
                     {
-                        if (HelperDeploymentService.DeployHelper())
-                        {
-                            deploymentNeeded = HelperDeploymentService.IsDeploymentNeeded();
-                            Logger.Info($"Bootstrap deploy finished; deployment still needed: {deploymentNeeded}");
-                        }
-                        else
-                        {
-                            Logger.Warn("Bootstrap deploy failed — falling back to elevated setup");
-                        }
+                        stagedOk = HelperDeploymentService.DeployToStaging();
+                        Logger.Info($"Staging finished: {stagedOk}");
                     }
                     catch (Exception dex)
                     {
-                        Logger.Warn($"Bootstrap deploy threw: {dex.Message} — falling back to elevated setup");
+                        Logger.Warn($"Staging threw: {dex.Message}");
                     }
                 }
 
@@ -148,12 +163,23 @@ namespace XboxGamingBarHelper
 
                     // Prefer the deployed exe for the elevated setup: a plain filesystem
                     // path with no MSIX/appmodel involvement — the path elevated task
-                    // launches have used safely all along. Only fall back to the current
-                    // (WindowsApps) exe when the deploy above failed and there is no
-                    // usable deployed copy to elevate.
-                    string setupExePath = (!deploymentNeeded && File.Exists(HelperDeploymentService.DeployedExePath))
-                        ? HelperDeploymentService.DeployedExePath
-                        : exePath;
+                    // launches have used safely all along — and admin-protected, so what
+                    // the user consents to is what runs. An older deployed copy is fine:
+                    // setup copies from the package folder passed with --source, renaming
+                    // its own locked files out of the way. Next best is the staged copy
+                    // (plain path, but user-writable); only fall back to the current
+                    // (WindowsApps) exe when neither exists. A deployed copy only counts
+                    // when it carries a .version stamp: DeployFiles removes the stamp before
+                    // copying and writes it only after a complete copy, so a stamped copy is a
+                    // consistent set of files that will actually start.
+                    string setupExePath;
+                    if (HelperDeploymentService.IsDeployedCopyIntact()
+                        && !string.IsNullOrEmpty(HelperDeploymentService.GetDeployedVersion()))
+                        setupExePath = HelperDeploymentService.DeployedExePath;
+                    else if (stagedOk && File.Exists(HelperDeploymentService.StagedExePath))
+                        setupExePath = HelperDeploymentService.StagedExePath;
+                    else
+                        setupExePath = exePath;
                     Logger.Info($"Setup needed - launching with --setup flag (will trigger UAC)... exe={setupExePath}");
                     StampSetupLaunchMarker();
                     if (LaunchElevatedForSetup(setupExePath, args))
@@ -340,6 +366,88 @@ namespace XboxGamingBarHelper
         }
 
         /// <summary>
+        /// One-time migration for installs from before the security hardening: the elevated
+        /// logon task still points at the user-writable LocalCache copy (the one this process
+        /// was started from). Copies the installed package's helper to Program Files and
+        /// repoints the task. Runs in the background; the current process keeps running and
+        /// the next logon / task run starts the Program Files copy. Needs no UAC (we're
+        /// already elevated). Failure only logs: the next widget-launched bootstrap still
+        /// sees the task misconfigured and falls back to the UAC setup.
+        /// </summary>
+        private static void MigrateLegacyDeploymentAsync(string currentExePath)
+        {
+            var migrateThread = new Thread(() =>
+            {
+                try
+                {
+                    Logger.Warn($"Elevated helper is running from a legacy location ({currentExePath}); migrating to {HelperDeploymentService.HelperFolder}");
+
+                    string source = HelperDeploymentService.FindInstalledPackageHelperDirectory();
+                    if (source == null)
+                    {
+                        Logger.Warn("Legacy migration: installed GoTweaks package not found; skipped");
+                        return;
+                    }
+
+                    string packageVersion = HelperDeploymentService.GetPackageVersionFromPath(source);
+                    bool copyNeeded = !HelperDeploymentService.IsDeployedCopyIntact()
+                        || packageVersion == null
+                        || !string.Equals(packageVersion, HelperDeploymentService.GetDeployedVersion(), StringComparison.OrdinalIgnoreCase);
+                    if (copyNeeded && !HelperDeploymentService.DeployHelper(source))
+                    {
+                        Logger.Warn("Legacy migration: deploy to Program Files failed; task left unchanged");
+                        return;
+                    }
+
+                    if (!ScheduledTaskService.IsTaskConfiguredCorrectly())
+                    {
+                        Logger.Info("Legacy migration: repointing the scheduled task to the Program Files copy...");
+                        if (!ScheduledTaskService.CreateOrUpdateTask())
+                        {
+                            Logger.Warn("Legacy migration: could not repoint the scheduled task");
+                            return;
+                        }
+                    }
+
+                    Logger.Info("Legacy migration complete: the next logon/task run starts the helper from Program Files");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error($"Legacy migration failed: {ex.Message}");
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "LegacyDeploymentMigration"
+            };
+            migrateThread.Start();
+        }
+
+        /// <summary>
+        /// Value of "--source &lt;dir&gt;" on this process's command line, or null.
+        /// HelperDeploymentService.DeployHelper validates it (must be the GoTweaks package
+        /// folder under WindowsApps).
+        /// </summary>
+        private static string GetSetupSourceArgument()
+        {
+            try
+            {
+                var cmd = Environment.GetCommandLineArgs();
+                for (int i = 0; i < cmd.Length - 1; i++)
+                {
+                    if (string.Equals(cmd[i], "--source", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return cmd[i + 1];
+                    }
+                }
+            }
+            catch
+            {
+            }
+            return null;
+        }
+
+        /// <summary>
         /// Performs the setup process: deploys files and creates task.
         /// Called from Program.cs when --setup flag is present.
         /// Returns true if setup succeeded and task was launched.
@@ -381,7 +489,9 @@ namespace XboxGamingBarHelper
                 // Step 1: Deploy helper files
                 Logger.Info("Step 1: Deploying helper files...");
                 DebugLog("Step 1: Deploying...");
-                if (!HelperDeploymentService.DeployHelper())
+                string setupSource = GetSetupSourceArgument();
+                DebugLog($"--source: {setupSource ?? "(none)"}");
+                if (!HelperDeploymentService.DeployHelper(setupSource))
                 {
                     Logger.Error("Failed to deploy helper files");
                     DebugLog("ERROR: DeployHelper returned false");
@@ -558,9 +668,25 @@ namespace XboxGamingBarHelper
         {
             try
             {
-                // Build arguments: original args + --setup flag
-                var argsList = args.Where(a => a != "--setup").ToList();
+                // Build arguments: original args + --setup flag + --source "<package helper
+                // folder>". The setup exe may be the staged copy (no package identity), so
+                // it is told where the trusted package files are; PerformSetup validates it.
+                var argsList = new System.Collections.Generic.List<string>();
+                for (int i = 0; i < args.Length; i++)
+                {
+                    if (args[i] == "--setup") continue;
+                    if (args[i] == "--source") { i++; continue; } // drop flag and its value
+                    argsList.Add(args[i]);
+                }
                 argsList.Add("--setup");
+                string packageSource = null;
+                try { packageSource = HelperDeploymentService.GetSourceDirectory(); } catch { packageSource = null; }
+                if (HelperDeploymentService.LooksLikePackageSourceDirectory(packageSource)
+                    && packageSource.IndexOf('"') < 0)
+                {
+                    argsList.Add("--source");
+                    argsList.Add("\"" + packageSource.TrimEnd('\\') + "\"");
+                }
                 string arguments = string.Join(" ", argsList);
 
                 var startInfo = new ProcessStartInfo

@@ -78,6 +78,20 @@ namespace XboxGamingBarHelper
                     }
                 }
 
+                // Deployed helper runs from Program Files (no package identity, exe path not
+                // under the package folder): use the known package family name.
+                if (string.IsNullOrEmpty(packageDataFolder))
+                {
+                    var byFamilyName = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                        "Packages", Services.HelperDeploymentService.FallbackPackageFamilyName, "LocalState");
+                    if (Directory.Exists(byFamilyName))
+                    {
+                        packageDataFolder = byFamilyName;
+                        Logger.Info($"Package LocalState folder (from family name): {packageDataFolder}");
+                    }
+                }
+
                 if (string.IsNullOrEmpty(packageDataFolder))
                 {
                     Logger.Warn("Could not determine package LocalState folder for uninstall detection");

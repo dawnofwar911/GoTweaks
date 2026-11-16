@@ -46,8 +46,11 @@ namespace XboxGamingBarHelper.Settings
             {
                 var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
 
-                // Prefer LocalState when running without package identity.
+                // Prefer LocalState when running without package identity. The deployed
+                // helper runs from Program Files now (not LocalCache), so the exe path no
+                // longer reveals the package folder: fall back to the known family name.
                 var settingsFolder = GetLocalStateFromExePath()
+                    ?? GetLocalStateFromFamilyName(localAppData)
                     ?? Path.Combine(localAppData, "GoTweaks");
 
                 Directory.CreateDirectory(settingsFolder);
@@ -63,6 +66,20 @@ namespace XboxGamingBarHelper.Settings
             {
                 Logger.Warn($"Failed to initialize fallback settings: {ex.Message}");
                 _fallbackSettings = new Dictionary<string, object>();
+            }
+        }
+
+        private static string GetLocalStateFromFamilyName(string localAppData)
+        {
+            try
+            {
+                var localState = Path.Combine(localAppData, "Packages",
+                    Services.HelperDeploymentService.FallbackPackageFamilyName, "LocalState");
+                return Directory.Exists(localState) ? localState : null;
+            }
+            catch
+            {
+                return null;
             }
         }
 
