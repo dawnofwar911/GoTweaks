@@ -73,8 +73,14 @@ namespace XboxGamingBarHelper
 
             try
             {
-                // Never turn off screen while a game is actively in foreground
-                if (systemManager?.RunningGame?.Value.IsValid() == true && systemManager.RunningGame.Value.IsForeground)
+                // Never turn off screen while a game is actively in foreground. Only trust
+                // RunningGame as "a game" when Profile "Games Only" is on: with it off,
+                // SystemManager reports ANY foreground window (desktop apps, Explorer) as the
+                // running game, which disabled the screen saver everywhere. Without that
+                // classification fall through to the idle timers (keyboard/mouse + gamepad),
+                // which already keep the screen on while a game is being played.
+                bool gamesOnly = settingsManager?.ProfileGamesOnly?.Value == true;
+                if (gamesOnly && systemManager?.RunningGame?.Value.IsValid() == true && systemManager.RunningGame.Value.IsForeground)
                 {
                     return;
                 }
