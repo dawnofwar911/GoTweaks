@@ -180,6 +180,11 @@ namespace XboxGamingBar
             deleteGameProfile?.ForceSetValue(gameName);
             Logger.Info($"Sent DeleteGameProfile to helper for {gameName}");
 
+            // Remember the delete so the XML recovery import (SyncProfilesFromHelperXmls)
+            // never re-creates this profile, even if the helper hasn't removed the XML yet
+            // (async delete) or was disconnected.
+            TombstoneGameProfile(gameName);
+
             if (profileDeleted || controllerDeleted)
             {
                 // If we deleted the current game's profile(s), reset its per-game toggles so the
