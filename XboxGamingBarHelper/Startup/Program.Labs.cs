@@ -1473,21 +1473,26 @@ namespace XboxGamingBarHelper
                     Logger.Info("Labs: Pipe not connected (widget suspended or closed) - activating widget via protocol URI");
                 }
 
-                // If pipe was not connected or message delivery failed, activate the widget directly via protocol URI:
-                // ms-gamebarwidget:GamingWidget
+                // If pipe was not connected or message delivery failed, ask Game Bar to activate
+                // the widget. "ms-gamebarwidget:" is the scheme Game Bar uses to activate *us*;
+                // it is not registered with the shell, so launching it shows Windows' "You'll
+                // need a new app to open this link" prompt. The public Game Bar URI is
+                // ms-gamebar:activate/<PackageFamilyName>_<AppId>_<AppExtensionId>. Launch it as
+                // the non-elevated user: ms-gamebar: from the elevated helper was a no-op.
                 if (!focusedViaPipe)
                 {
                     try
                     {
-                        var psi = new System.Diagnostics.ProcessStartInfo
+                        const string widgetActivationUri =
+                            "ms-gamebar:activate/PlayandBuildCustom.10365195AA1EC_8edemd50ez3gg_App_GamingWidget";
+                        if (Services.UnelevatedLauncher.ShellOpen(widgetActivationUri))
                         {
-                            FileName = "explorer.exe",
-                            Arguments = "ms-gamebarwidget:GamingWidget",
-                            UseShellExecute = true,
-                            CreateNoWindow = true
-                        };
-                        System.Diagnostics.Process.Start(psi);
-                        Logger.Info("Labs: Activated ms-gamebarwidget:GamingWidget via protocol URI");
+                            Logger.Info($"Labs: Requested widget activation via {widgetActivationUri}");
+                        }
+                        else
+                        {
+                            Logger.Warn("Labs: Widget activation URI could not be launched");
+                        }
                     }
                     catch (Exception pEx)
                     {
