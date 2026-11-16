@@ -4568,7 +4568,7 @@ namespace XboxGamingBarHelper.Labs
                 {
                     case LegionButtonAction.XboxGuide:
                         // Check if Steam UI (Big Picture) or a Steam game is active. If so,
-                        // handle the Guide press by emitting Steam's overlay/menu shortcut (Ctrl+1 / Shift+Tab)
+                        // handle the Guide press by emitting Steam's overlay/menu shortcut (F1 / Shift+Tab)
                         // and suppress the raw virtual Xbox Guide pulse. On Windows, emitting a raw
                         // Guide button on an Xbox controller causes the OS Game Bar service to capture
                         // the button and steal focus from Steam.
@@ -4699,10 +4699,12 @@ namespace XboxGamingBarHelper.Labs
         }
 
         /// <summary>
-        /// When Steam or a Steam game is active, emit the appropriate shortcut (Shift+Tab for
-        /// in-game overlay, Ctrl+1 for Steam Big Picture menu) and suppress the raw virtual Xbox Guide
-        /// pulse. When Controller Emulation is OFF, handles desktop Guide actions via Big Picture focus
-        /// or Game Bar fallback. Returns true if handled.
+        /// Guide-button keyboard heuristics. With Guide mode "GameBar" fires Win+G. With
+        /// Controller Emulation ON and Guide mode "Native" (the default) it does nothing and
+        /// returns false, so the emulated Guide press reaches the game / Steam Input exactly
+        /// as the user chose. Only when emulation is OFF (no virtual pad can deliver Guide)
+        /// does it emit Steam's shortcuts (Shift+Tab in a Steam game, F1 when the Steam
+        /// client / Big Picture is foreground) or fall back to Win+G. Returns true if handled.
         /// </summary>
         private static bool TryHandleSteamGuideOverlay()
         {
@@ -4714,6 +4716,18 @@ namespace XboxGamingBarHelper.Labs
                     Logger.Info("LegionButtonMonitor: GuideMode=GameBar — firing Win+G");
                     Program.SendKeyboardShortcut("Win+G");
                     return true;
+                }
+
+                // Respect the user's Guide mode: with Controller Emulation ON and Guide mode
+                // Native (or unset, which defaults to Native) the emulated pad delivers Guide.
+                // Previously the foreground-game checks below ran first and always replaced the
+                // Guide press with Win+G / Shift+Tab while any game was in the foreground.
+                bool emulationOn = Program.ControllerEmulationManager?.EmulationEnabled ?? false;
+                bool nativeMode = string.IsNullOrEmpty(guideMode)
+                    || string.Equals(guideMode, "Native", StringComparison.OrdinalIgnoreCase);
+                if (emulationOn && nativeMode)
+                {
+                    return false;
                 }
 
                 // 1. Check for active/foreground game via SystemManager
