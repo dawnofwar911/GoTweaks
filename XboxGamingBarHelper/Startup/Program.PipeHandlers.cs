@@ -813,48 +813,51 @@ namespace XboxGamingBarHelper
                 }
 
                 // Handle upgrade helper request (UAC-free upgrade - preferred)
-                // The widget sends the MSIX source path so we can copy files after exit
+                // The widget sends the MSIX source path, but the elevated helper never copies
+                // from a client-supplied path: it looks the installed package up itself and
+                // only uses the pipe value for logging.
                 if (pipeMsg.Extra.ContainsKey("UpgradeHelper"))
                 {
-                    string msixSourcePath = pipeMsg.Extra["UpgradeHelper"]?.ToString();
-                    if (!string.IsNullOrEmpty(msixSourcePath))
+                    string requestedPath = pipeMsg.Extra["UpgradeHelper"]?.ToString();
+                    string msixSourcePath = Services.HelperDeploymentService.FindInstalledPackageHelperDirectory();
+                    Logger.Info($"Pipe: UpgradeHelper request received - requested source: {requestedPath ?? "(none)"}, installed package: {msixSourcePath ?? "(not found)"}");
+
+                    // Launch the upgrade script that copies files and restarts after we exit.
+                    // If it can't be started (no trusted package, downgrade, ...), keep running
+                    // and NACK: the widget falls back to ExitHelper + the normal bootstrap.
+                    if (string.IsNullOrEmpty(msixSourcePath) || !LaunchUpgradeScript(msixSourcePath, allowDowngrade: false))
                     {
-                        Logger.Info($"Pipe: UpgradeHelper request received - source: {msixSourcePath}");
-                        NotifyWidgetHelperExiting("UpgradeHelper");
-                        LogManager.Flush(); // Ensure log is written before we start shutdown
-                        SendPipeAck(pipeMsg.RequestId);
-
-                        // Launch upgrade script that will copy files and restart after we exit
-                        LaunchUpgradeScript(msixSourcePath);
-
-                        _isShuttingDown = true;
-
-                        // Schedule a forced exit
-                        _ = Task.Run(async () =>
-                        {
-                            await Task.Delay(2000); // Give main loop time to exit gracefully
-                            if (_isShuttingDown)
-                            {
-                                Logger.Info("Forcing exit for upgrade");
-                                LogManager.Flush(); // Ensure log is written before exit
-
-                                // Release mutex before exiting to ensure clean restart
-                                try
-                                {
-                                    singleInstanceMutex?.ReleaseMutex();
-                                    singleInstanceMutex?.Dispose();
-                                }
-                                catch { /* Ignore mutex errors during shutdown */ }
-
-                                Environment.Exit(0);
-                            }
-                        });
-                    }
-                    else
-                    {
-                        Logger.Warn("Pipe: UpgradeHelper request missing source path");
+                        Logger.Warn("Pipe: UpgradeHelper refused - helper keeps running");
                         SendPipeAck(pipeMsg.RequestId, false);
+                        return;
                     }
+
+                    NotifyWidgetHelperExiting("UpgradeHelper");
+                    LogManager.Flush(); // Ensure log is written before we start shutdown
+                    SendPipeAck(pipeMsg.RequestId);
+
+                    _isShuttingDown = true;
+
+                    // Schedule a forced exit
+                    _ = Task.Run(async () =>
+                    {
+                        await Task.Delay(2000); // Give main loop time to exit gracefully
+                        if (_isShuttingDown)
+                        {
+                            Logger.Info("Forcing exit for upgrade");
+                            LogManager.Flush(); // Ensure log is written before exit
+
+                            // Release mutex before exiting to ensure clean restart
+                            try
+                            {
+                                singleInstanceMutex?.ReleaseMutex();
+                                singleInstanceMutex?.Dispose();
+                            }
+                            catch { /* Ignore mutex errors during shutdown */ }
+
+                            Environment.Exit(0);
+                        }
+                    });
                     return;
                 }
 

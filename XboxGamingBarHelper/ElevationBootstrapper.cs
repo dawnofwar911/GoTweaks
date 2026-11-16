@@ -52,6 +52,14 @@ namespace XboxGamingBarHelper
         private static readonly string SetupLaunchMarkerPath =
             Path.Combine(HelperDeploymentService.StagingFolder, ".setup_launch");
 
+        // Task-based (UAC-free) self-upgrade throttle. The non-elevated side's marker lives in
+        // the staging folder (it only throttles; deleting it just allows another attempt); the
+        // elevated side keeps its own in an admin-only folder so a failing copy can't restart
+        // the helper in a loop.
+        private const int SelfUpgradeCooldownMinutes = 10;
+        private static readonly string SelfUpgradeMarkerPath =
+            Path.Combine(HelperDeploymentService.StagingFolder, ".self_upgrade_launch");
+
         /// <summary>
         /// Ensures the helper is running with admin privileges.
         /// Returns true if execution should continue, false if we're relaunching elevated.
@@ -79,7 +87,20 @@ namespace XboxGamingBarHelper
                     {
                         EnsureDeploymentAsync();
                     }
-                    else if (!HelperDeploymentService.IsRunningFromDeployedLocation())
+                    else if (HelperDeploymentService.IsRunningFromDeployedLocation())
+                    {
+                        // Started by the task from Program Files while a different package
+                        // version is installed (normal after an MSIX update): copy the new
+                        // files over ourselves via the upgrade script and let it restart the
+                        // task. We're already elevated, so updates need no UAC.
+                        if (TryStartSelfUpgrade())
+                        {
+                            Logger.Info("Self-upgrade script started; exiting so it can replace the files");
+                            LogManager.Flush();
+                            return false;
+                        }
+                    }
+                    else
                     {
                         // Pre-hardening install: the logon task still runs the helper from the
                         // user-writable LocalCache copy. We're elevated, so move it to Program
@@ -124,8 +145,30 @@ namespace XboxGamingBarHelper
                 // launched from a plain filesystem path rather than from WindowsApps (the
                 // combination that wedged pre-Main, 2026-07-29). The elevated setup copies
                 // from the validated package folder (--source), never from the staging copy.
-                // Routine updates while the elevated helper is running still need no UAC:
-                // the widget's UpgradeHelper path has the running (elevated) helper do it.
+                //
+                // UAC-free update path. A non-elevated process can't refresh Program Files,
+                // but when the elevated task and a complete (stamped) Program Files copy
+                // already exist, the task-started helper upgrades itself from the installed
+                // package (TryStartSelfUpgrade). So just launch the task; only if that was
+                // tried within SelfUpgradeCooldownMinutes and we're still outdated do we
+                // fall back to the UAC setup below (bounded: at most one prompt).
+                bool selfUpgradeViaTask = false;
+                if (deploymentNeeded && taskConfigured
+                    && HelperDeploymentService.IsDeployedCopyIntact()
+                    && !string.IsNullOrEmpty(HelperDeploymentService.GetDeployedVersion()))
+                {
+                    if (SelfUpgradeAttemptedRecently())
+                    {
+                        Logger.Warn($"A task-based self-upgrade was tried <{SelfUpgradeCooldownMinutes} min ago and the deployment is still outdated - falling back to the UAC setup");
+                    }
+                    else
+                    {
+                        Logger.Info("Deployment outdated, but the elevated task and an intact Program Files copy exist - letting the task-started helper upgrade itself (no UAC)");
+                        selfUpgradeViaTask = true;
+                        deploymentNeeded = false; // fall through to the scheduled-task launch below
+                    }
+                }
+
                 bool stagedOk = false;
                 if (deploymentNeeded)
                 {
@@ -268,6 +311,10 @@ namespace XboxGamingBarHelper
                 catch (Exception ex)
                 {
                     Logger.Warn($"Could not acquire relaunch-in-progress mutex: {ex.Message} — continuing anyway");
+                }
+                if (selfUpgradeViaTask)
+                {
+                    StampSelfUpgradeAttempt();
                 }
                 if (ScheduledTaskService.RunTaskNow())
                 {
@@ -421,6 +468,97 @@ namespace XboxGamingBarHelper
                 Name = "LegacyDeploymentMigration"
             };
             migrateThread.Start();
+        }
+
+        /// <summary>
+        /// Elevated helper started from Program Files: if the installed package's version
+        /// differs from the deployed .version, launch the upgrade script (copies the package
+        /// files over the deployed copy after we exit, re-stamps, restarts the task). The
+        /// installed package is authoritative, so downgrades (rollback) are allowed. At most
+        /// one attempt per package version per SelfUpgradeCooldownMinutes.
+        /// </summary>
+        /// <returns>True when the script was started and this process must exit.</returns>
+        private static bool TryStartSelfUpgrade()
+        {
+            try
+            {
+                string source = HelperDeploymentService.FindInstalledPackageHelperDirectory();
+                if (source == null)
+                {
+                    return false;
+                }
+                string packageVersion = HelperDeploymentService.GetPackageVersionFromPath(source);
+                string deployedVersion = HelperDeploymentService.GetDeployedVersion();
+                if (packageVersion == null
+                    || string.Equals(packageVersion, deployedVersion, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                string marker = Path.Combine(
+                    HelperDeploymentService.EnsureAdminOnlyDirectory("State", usersCanRead: false),
+                    "self_upgrade_attempt");
+                try
+                {
+                    if (File.Exists(marker))
+                    {
+                        string[] parts = File.ReadAllText(marker).Trim().Split('|');
+                        if (parts.Length == 2
+                            && parts[0] == packageVersion
+                            && DateTime.TryParse(parts[1], System.Globalization.CultureInfo.InvariantCulture,
+                                System.Globalization.DateTimeStyles.RoundtripKind, out var lastAttempt)
+                            && DateTime.UtcNow - lastAttempt.ToUniversalTime() < TimeSpan.FromMinutes(SelfUpgradeCooldownMinutes))
+                        {
+                            Logger.Warn($"Self-upgrade to {packageVersion} already attempted at {parts[1]}; not retrying (the UAC setup will fix it)");
+                            return false;
+                        }
+                    }
+                    File.WriteAllText(marker, packageVersion + "|" + DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture));
+                }
+                catch (Exception mex)
+                {
+                    Logger.Warn($"Self-upgrade marker unavailable ({mex.Message}); not attempting a self-upgrade");
+                    return false;
+                }
+
+                Logger.Info($"Installed package {packageVersion} differs from deployed {deployedVersion ?? "(none)"}; self-upgrading from {source}");
+                return Program.LaunchUpgradeScript(source, allowDowngrade: true);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Self-upgrade check failed: {ex.Message}");
+                return false;
+            }
+        }
+
+        private static bool SelfUpgradeAttemptedRecently()
+        {
+            try
+            {
+                if (!File.Exists(SelfUpgradeMarkerPath))
+                {
+                    return false;
+                }
+                var age = DateTime.UtcNow - File.GetLastWriteTimeUtc(SelfUpgradeMarkerPath);
+                return age >= TimeSpan.Zero && age < TimeSpan.FromMinutes(SelfUpgradeCooldownMinutes);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void StampSelfUpgradeAttempt()
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(SelfUpgradeMarkerPath));
+                File.WriteAllText(SelfUpgradeMarkerPath, DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture));
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug($"Could not stamp self-upgrade marker: {ex.Message}");
+            }
         }
 
         /// <summary>
