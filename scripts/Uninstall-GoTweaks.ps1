@@ -7,7 +7,12 @@
     processes, clears GoTweaks' HidHide rules so your controller is never
     left hidden, sweeps phantom virtual controllers, removes the scheduled
     task and the deployed helper copy), then removes the GoTweaks app
-    package itself.
+    package itself, the deployed helper folder (%ProgramFiles%\GoTweaks),
+    GoTweaks' %ProgramData%\GoTweaks folder and HKLM\SOFTWARE\GoTweaks.
+
+    The helper is deployed to %ProgramFiles%\GoTweaks\Helper (admin-only).
+    Installs from before the security hardening used the package's
+    LocalCache\GoTweaks\Helper folder; that location is still handled.
 
     Drivers (PawnIO, ViGEmBus, usbip-win2) are LEFT INSTALLED by default
     because other tools share them (RTSS, DS4Windows, Handheld Companion).
@@ -51,16 +56,30 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 Write-Host "GoTweaks uninstall + system restoration" -ForegroundColor Cyan
 
 # 1. Find the deployed helper (survives even if the store package is already gone).
+# Order matters: this script runs the helper elevated, so prefer the admin-only
+# Program Files copy over the user-writable LocalCache copy that pre-hardening
+# installs used. (The package's WindowsApps exe is deliberately not used:
+# elevating it directly is the combination that wedged before Main.)
 $package = Get-AppxPackage -Name "PlayandBuildCustom*" -ErrorAction SilentlyContinue | Select-Object -First 1
+$deployRoot = Join-Path $env:ProgramFiles "GoTweaks"
+$dataRoot = Join-Path $env:ProgramData "GoTweaks"
 $helperCandidates = @()
+$helperCandidates += Join-Path $deployRoot "Helper\XboxGamingBarHelper.exe"
+$legacyCandidates = @()
 if ($package) {
-    $helperCandidates += Join-Path $env:LOCALAPPDATA "Packages\$($package.PackageFamilyName)\LocalCache\GoTweaks\Helper\XboxGamingBarHelper.exe"
+    $legacyCandidates += Join-Path $env:LOCALAPPDATA "Packages\$($package.PackageFamilyName)\LocalCache\GoTweaks\Helper\XboxGamingBarHelper.exe"
 }
-# Fallback: search all package folders for a deployed helper.
-$helperCandidates += Get-ChildItem "$env:LOCALAPPDATA\Packages" -Directory -Filter "PlayandBuildCustom*" -ErrorAction SilentlyContinue |
+# Fallback: search all package folders for a legacy deployed helper.
+$legacyCandidates += Get-ChildItem "$env:LOCALAPPDATA\Packages" -Directory -Filter "PlayandBuildCustom*" -ErrorAction SilentlyContinue |
     ForEach-Object { Join-Path $_.FullName "LocalCache\GoTweaks\Helper\XboxGamingBarHelper.exe" }
 
 $helper = $helperCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $helper) {
+    $helper = $legacyCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($helper) {
+        Write-Warning "Using the legacy helper copy in the package LocalCache (pre-hardening install): $helper"
+    }
+}
 
 if ($helper) {
     Write-Host "Running helper restoration: $helper"
@@ -78,7 +97,25 @@ if ($helper) {
     Write-Warning "If a controller is missing, open the HidHide Configuration Client and clear the device list."
 }
 
-# 2. Remove the app package.
+# 2. Remove the deployed helper (Program Files), GoTweaks' ProgramData folder and
+# the HKLM key (DisablePipeClientVerification escape hatch). The helper's own
+# --uninstall can't delete the folder it is running from, so finish it here.
+Get-Process XboxGamingBarHelper -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 1
+foreach ($dir in @($deployRoot, $dataRoot)) {
+    if (Test-Path -LiteralPath $dir) {
+        Write-Host "Removing $dir..."
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $dir) {
+            Write-Warning "Could not fully remove $dir (files in use?). Delete it after a reboot."
+        }
+    }
+}
+if (Test-Path 'HKLM:\SOFTWARE\GoTweaks') {
+    Remove-Item -Path 'HKLM:\SOFTWARE\GoTweaks' -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# 3. Remove the app package.
 if ($package) {
     Write-Host "Removing app package $($package.PackageFullName)..."
     Remove-AppxPackage -Package $package.PackageFullName
@@ -87,7 +124,7 @@ if ($package) {
     Write-Host "GoTweaks app package not found (already uninstalled)."
 }
 
-# 3. Remove the sideload signing certificate that Add-AppDevPackage installed
+# 4. Remove the sideload signing certificate that Add-AppDevPackage installed
 # into the machine's Trusted People store. Matched by the package publisher
 # (CN=dg) so nothing else is touched.
 try {
