@@ -741,9 +741,14 @@ namespace XboxGamingBarHelper
                                 else if (targetObj is string tStr && int.TryParse(tStr, out int parsedTdp) && parsedTdp > 0) targetTdp = parsedTdp;
                             }
 
-                            if (performanceManager.CurrentSPL == targetTdp && performanceManager.CurrentSPL > 0)
+                            // Skip only when a fresh, real hardware readback (Legion WMI) shows
+                            // SPL, SPPT and FPPT all at the target. CurrentSPL alone was stale
+                            // (2 s poll, Custom mode only), ignored SPPT/FPPT drift, and on
+                            // non-Legion PawnIO devices only echoed the last request, so Sticky
+                            // TDP never re-applied after an EC/firmware reset or resume.
+                            if (performanceManager.IsHardwareTdpConfirmed(targetTdp))
                             {
-                                Logger.Debug($"Pipe: ReapplyTDP skipped — hardware already confirmed at {targetTdp}W");
+                                Logger.Debug($"Pipe: ReapplyTDP skipped — fresh hardware readback confirms {targetTdp}W (SPL/SPPT/FPPT)");
                                 SendPipeAck(pipeMsg.RequestId);
                                 return;
                             }
