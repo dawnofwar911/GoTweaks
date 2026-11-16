@@ -1364,9 +1364,7 @@ namespace XboxGamingBarHelper
 
                                 // Admin-only folder (Users may read: App Installer runs as the
                                 // user) with a random name, instead of a fixed %TEMP% folder.
-                                var tempFolder = Path.Combine(
-                                    Services.HelperDeploymentService.EnsureAdminOnlyDirectory("Downloads", usersCanRead: true),
-                                    Guid.NewGuid().ToString("N"));
+                                var tempFolder = Services.SecureInstaller.CreateDownloadFolder();
                                 var zipPath = Path.Combine(tempFolder, "update.zip");
                                 Directory.CreateDirectory(tempFolder);
 

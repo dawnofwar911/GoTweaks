@@ -516,6 +516,7 @@
     <Compile Include="Services\UninstallService.cs" />
     <Compile Include="Services\ScheduledTaskService.cs" />
     <Compile Include="Services\SystemRestoreService.cs" />
+    <Compile Include="Services\SecureInstaller.cs" />
     <Compile Include="Services\UnelevatedLauncher.cs" />
     <Compile Include="IPC\NamedPipeServer.cs" />
     <Compile Include="Program.cs" />

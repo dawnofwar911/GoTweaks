@@ -126,47 +126,46 @@ namespace XboxGamingBarHelper.Services
         /// msix signing cert to be trusted on the machine — if it isn't,
         /// the install fails cleanly and the user is pointed at the
         /// releases page.
+        ///
+        /// Hardened: the URL a pipe client sends is not trusted — only the
+        /// asset URL from the helper's own last <see cref="CheckAsync"/> is
+        /// used, and it must be a release asset of <see cref="RepoPath"/> on
+        /// github.com (redirects only to *.githubusercontent.com). The bundle
+        /// goes to an admin-only random folder and stays open deny-write until
+        /// Add-AppxPackage has finished. Add-AppxPackage itself enforces the
+        /// package signature (trusted cert matching the manifest Publisher);
+        /// it is a per-user install, so it runs as the non-elevated user.
         /// </summary>
         public static async Task<string> InstallAsync(string downloadUrl)
         {
-            if (string.IsNullOrWhiteSpace(downloadUrl))
-                return "{\"success\":false,\"message\":\"No download URL from GitHub release.\"}";
+            string ownUrl = _lastResult?.DownloadUrl;
+            if (string.IsNullOrWhiteSpace(ownUrl))
+                return "{\"success\":false,\"message\":\"No download URL from GitHub release. Check for updates first.\"}";
+            if (!string.IsNullOrWhiteSpace(downloadUrl)
+                && !string.Equals(downloadUrl.Trim(), ownUrl, StringComparison.OrdinalIgnoreCase))
+            {
+                Logger.Warn($"GoTweaksUpdateService: ignoring client-supplied URL {downloadUrl}; using the checked release asset {ownUrl}");
+            }
 
-            Uri uri;
-            try { uri = new Uri(downloadUrl); }
-            catch { return "{\"success\":false,\"message\":\"Invalid URL.\"}"; }
-            if (uri.Scheme != "https")
-                return "{\"success\":false,\"message\":\"Only https URLs are accepted.\"}";
-            // Pin to GitHub — the only host that serves release assets.
-            var host = uri.Host.ToLowerInvariant();
-            bool trusted = host.EndsWith("github.com") || host.EndsWith("githubusercontent.com");
-            if (!trusted)
-                return "{\"success\":false,\"message\":\"Host not allowed: " + host + "\"}";
+            if (!Uri.TryCreate(ownUrl, UriKind.Absolute, out Uri uri) || !IsAllowedReleaseAssetUrl(uri))
+                return "{\"success\":false,\"message\":\"Release asset URL not allowed.\"}";
 
-            string fileName = System.IO.Path.GetFileName(uri.LocalPath);
-            if (string.IsNullOrWhiteSpace(fileName)) fileName = "gotweaks.msixbundle";
-            foreach (var bad in System.IO.Path.GetInvalidFileNameChars())
-                fileName = fileName.Replace(bad, '_');
+            string fileName = SecureInstaller.SanitizeFileName(System.IO.Path.GetFileName(uri.LocalPath), "gotweaks.msixbundle");
+            if (!fileName.EndsWith(".msixbundle", StringComparison.OrdinalIgnoreCase))
+                return "{\"success\":false,\"message\":\"Release asset is not an .msixbundle.\"}";
 
-            string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "GoTweaksSelfUpdate");
-            try { System.IO.Directory.CreateDirectory(dir); }
-            catch (Exception ex) { return "{\"success\":false,\"message\":\"Temp dir: " + ex.Message.Replace("\"", "'") + "\"}"; }
-
-            string target = System.IO.Path.Combine(dir, fileName);
-            Logger.Info($"GoTweaksUpdateService: downloading {downloadUrl} -> {target}");
+            SecureInstaller.HeldFile bundle;
+            Logger.Info($"GoTweaksUpdateService: downloading {ownUrl}");
             try
             {
-                using var response = await _http.GetAsync(downloadUrl, HttpCompletionOption.ResponseHeadersRead);
-                if (!response.IsSuccessStatusCode)
-                    return "{\"success\":false,\"message\":\"HTTP " + (int)response.StatusCode + " from GitHub.\"}";
-                using (var src = await response.Content.ReadAsStreamAsync())
-                using (var dst = System.IO.File.Create(target))
-                    await src.CopyToAsync(dst);
+                bundle = await SecureInstaller.DownloadAndVerifyAsync(
+                    uri, IsAllowedReleaseDownloadHost, fileName,
+                    new SecureInstaller.Expectation(), TimeSpan.FromMinutes(10));
             }
             catch (Exception ex)
             {
                 Logger.Warn($"GoTweaks download failed: {ex.Message}");
-                return "{\"success\":false,\"message\":\"Download failed: " + ex.Message.Replace("\"", "'") + "\"}";
+                return "{\"success\":false,\"message\":\"Download failed: " + ex.Message.Replace("\\", "/").Replace("\"", "'") + "\"}";
             }
 
             // Kick off the install via PowerShell. Add-AppxPackage blocks for
@@ -174,22 +173,42 @@ namespace XboxGamingBarHelper.Services
             // widget will disappear on its own once the app is reinstalled.
             try
             {
-                string psCommand = $"Add-AppxPackage -Path '{target.Replace("'", "''")}' -ForceApplicationShutdown";
-                var psi = new System.Diagnostics.ProcessStartInfo
+                string powershell = System.IO.Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
+                string psCommand = $"Add-AppxPackage -Path '{bundle.Path.Replace("'", "''")}' -ForceApplicationShutdown";
+                string commandLine = $"\"{powershell}\" -NoProfile -ExecutionPolicy Bypass -Command \"{psCommand}\"";
+                var started = new TaskCompletionSource<bool>();
+                _ = Task.Run(() =>
                 {
-                    FileName = "powershell.exe",
-                    Arguments = $"-NoProfile -ExecutionPolicy Bypass -Command \"{psCommand}\"",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-                System.Diagnostics.Process.Start(psi);
-                Logger.Info($"GoTweaks update install started via PowerShell for {target}");
+                    try
+                    {
+                        var result = UnelevatedLauncher.Start(powershell, commandLine, hideWindow: true,
+                            waitMilliseconds: (int)TimeSpan.FromMinutes(10).TotalMilliseconds,
+                            onStarted: () => started.TrySetResult(true));
+                        started.TrySetResult(result.Started);
+                        Logger.Info($"GoTweaks update install: started={result.Started}, exited={result.Exited}, exitCode={result.ExitCode}");
+                    }
+                    catch (Exception ex)
+                    {
+                        started.TrySetResult(false);
+                        Logger.Warn($"GoTweaks update install threw: {ex.Message}");
+                    }
+                    finally
+                    {
+                        bundle.Dispose();
+                    }
+                });
+
+                if (!await started.Task)
+                {
+                    return "{\"success\":false,\"message\":\"Install failed: could not start PowerShell as the user.\"}";
+                }
+                Logger.Info($"GoTweaks update install started via PowerShell for {bundle.Path}");
                 return "{\"success\":true,\"message\":\"Installing update — the widget will reload when finished.\"}";
             }
             catch (Exception ex)
             {
                 Logger.Warn($"GoTweaks install launch failed: {ex.Message}");
-                return "{\"success\":false,\"message\":\"Install failed: " + ex.Message.Replace("\"", "'") + "\"}";
+                return "{\"success\":false,\"message\":\"Install failed: " + ex.Message.Replace("\\", "/").Replace("\"", "'") + "\"}";
             }
         }
 

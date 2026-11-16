@@ -29,6 +29,10 @@ namespace XboxGamingBarHelper.Settings
         private const string UsbipDownloadUrl =
             "https://github.com/vadimgrn/usbip-win2/releases/download/v.0.9.7.8/USBip-0.9.7.8-x64.exe";
 
+        // SHA-256 of that exact release asset (fetched 2026-11-16; Authenticode signer
+        // "Cloudyne Systems (Scheibling Consulting AB)"). Bump together with the URL.
+        private const string UsbipSha256 = "44451fe06f4186125c2a5ecd25b099c5560a61a60b1e56f5a0758e77a60afa44";
+
         public InstallUsbipProperty(SettingsManager inManager)
             : base("", null, Function.Viiper_InstallUsbip, inManager)
         {
@@ -48,53 +52,51 @@ namespace XboxGamingBarHelper.Settings
 
         private void InstallUsbip()
         {
-            string tempPath = Path.Combine(Path.GetTempPath(), "USBip_setup.exe");
-
+            Services.SecureInstaller.HeldFile installer = null;
             try
             {
                 Logger.Info($"Downloading usbip-win2 installer from {UsbipDownloadUrl}...");
-                using (var client = new TimedWebClient(TimeSpan.FromSeconds(60)))
+                // Admin-only random folder, held deny-write, pinned SHA-256: only that exact
+                // installer is ever run silently with the helper's elevation (it used to be a
+                // fixed %TEMP%\USBip_setup.exe that any process of the user could swap).
+                installer = Services.SecureInstaller.DownloadAndVerifyAsync(
+                        new Uri(UsbipDownloadUrl),
+                        host => Services.SecureInstaller.HostMatches(host, "github.com", "githubusercontent.com"),
+                        "USBip-0.9.7.8-x64.exe",
+                        new Services.SecureInstaller.Expectation
+                        {
+                            Sha256 = UsbipSha256,
+                            SignerNames = new[] { "Cloudyne Systems (Scheibling Consulting AB)" },
+                        },
+                        TimeSpan.FromSeconds(60))
+                    .GetAwaiter().GetResult();
+                Logger.Info($"usbip-win2 installer downloaded to {installer.Path} ({installer.Verdict}: {installer.Reason})");
+
+                Logger.Info("Launching usbip-win2 installer...");
+                var run = Services.SecureInstaller.Run(installer, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART", 180000);
+                if (!run.Started)
                 {
-                    client.Headers.Add("User-Agent", "GoTweaks/1.0");
-                    client.DownloadFile(UsbipDownloadUrl, tempPath);
+                    Logger.Warn($"usbip-win2 installer not started: {run.Message}");
                 }
-                Logger.Info($"usbip-win2 installer downloaded to {tempPath}");
-
-                var startInfo = new ProcessStartInfo
+                else if (run.Exited)
                 {
-                    FileName = tempPath,
-                    Arguments = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART",
-                    UseShellExecute = false,
-                    CreateNoWindow = true
-                };
-
-                Logger.Info("Launching usbip-win2 installer silently...");
-                using (var process = Process.Start(startInfo))
-                {
-                    if (process == null)
-                    {
-                        Logger.Warn("Failed to start usbip-win2 installer");
-                        return;
-                    }
-
-                    if (process.WaitForExit(180000))
-                    {
-                        Logger.Info($"usbip-win2 installation completed with exit code: {process.ExitCode}");
-                    }
-                    else
-                    {
-                        Logger.Warn("usbip-win2 installation timed out after 3 minutes");
-                        try { process.Kill(); } catch { }
-                    }
+                    Logger.Info($"usbip-win2 installation completed with exit code: {run.ExitCode}");
                 }
-            }
-            catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
-            {
-                Logger.Info("usbip-win2 installation cancelled by user (UAC prompt declined)");
-            }
-            catch (WebException ex)
-            {
-                Logger.Error($"Failed to download usbip-win2 installer: {ex.Message}");
+                else if (run.Elevated)
+                {
+                    Logger.Warn("usbip-win2 installation still running after 3 minutes");
+                }
+                else
+                {
+                    Logger.Info($"usbip-win2 installer handed to Windows for confirmation: {run.Message}");
+                }
+
+                if (run.Started && !run.Exited)
+                {
+                    // Still running (or awaiting UAC consent): keep the file locked a while.
+                    Services.SecureInstaller.ReleaseLater(installer, TimeSpan.FromMinutes(10));
+                    installer = null;
+                }
             }
             catch (Exception ex)
             {
@@ -102,14 +104,7 @@ namespace XboxGamingBarHelper.Settings
             }
             finally
             {
-                try
-                {
-                    if (File.Exists(tempPath)) File.Delete(tempPath);
-                }
-                catch (Exception ex)
-                {
-                    Logger.Warn($"Failed to cleanup usbip installer temp file: {ex.Message}");
-                }
+                installer?.Dispose();
 
                 // Update the prereq line + setup banner. A reboot may still be
                 // required before the virtual bus actually enumerates; detection

@@ -153,14 +153,16 @@ namespace XboxGamingBarHelper.Services
         /// <summary>
         /// Starts <paramref name="applicationPath"/> with <paramref name="commandLine"/> (which
         /// must include argv[0]) as the non-elevated interactive user, optionally waiting up to
-        /// <paramref name="waitMilliseconds"/> for it to exit.
+        /// <paramref name="waitMilliseconds"/> for it to exit. <paramref name="onStarted"/> is
+        /// called once the process exists, before any wait.
         /// </summary>
-        public static LaunchResult Start(string applicationPath, string commandLine, bool hideWindow, int waitMilliseconds = 0)
+        public static LaunchResult Start(string applicationPath, string commandLine, bool hideWindow,
+            int waitMilliseconds = 0, Action onStarted = null)
         {
             var result = new LaunchResult();
             if (!ElevationBootstrapper.IsRunningAsAdmin())
             {
-                return StartDirect(applicationPath, commandLine, hideWindow, waitMilliseconds);
+                return StartDirect(applicationPath, commandLine, hideWindow, waitMilliseconds, onStarted);
             }
 
             IntPtr shellProcess = IntPtr.Zero;
@@ -241,6 +243,7 @@ namespace XboxGamingBarHelper.Services
                     Logger.Info($"UnelevatedLauncher: started {Path.GetFileName(applicationPath)} as the non-elevated user (PID {pi.dwProcessId})");
                     result.Started = true;
                     result.ProcessId = pi.dwProcessId;
+                    try { onStarted?.Invoke(); } catch { }
                     if (waitMilliseconds > 0
                         && WaitForSingleObject(pi.hProcess, (uint)waitMilliseconds) == WAIT_OBJECT_0
                         && GetExitCodeProcess(pi.hProcess, out uint exitCode))
@@ -270,7 +273,7 @@ namespace XboxGamingBarHelper.Services
             }
         }
 
-        private static LaunchResult StartDirect(string applicationPath, string commandLine, bool hideWindow, int waitMilliseconds)
+        private static LaunchResult StartDirect(string applicationPath, string commandLine, bool hideWindow, int waitMilliseconds, Action onStarted)
         {
             var result = new LaunchResult();
             try
@@ -294,6 +297,7 @@ namespace XboxGamingBarHelper.Services
                     if (process == null) return result;
                     result.Started = true;
                     result.ProcessId = process.Id;
+                    try { onStarted?.Invoke(); } catch { }
                     if (waitMilliseconds > 0 && process.WaitForExit(waitMilliseconds))
                     {
                         result.Exited = true;
