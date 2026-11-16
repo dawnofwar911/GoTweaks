@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Pipes;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
@@ -262,6 +263,17 @@ namespace XboxGamingBarHelper.IPC
                         break;
                     }
 
+                    // Only GoTweaks itself may drive the elevated helper: the widget (by
+                    // package family name) or a GoTweaks helper exe from an admin-protected
+                    // location. Anything else (any other process of the user) is dropped.
+                    if (!PipeClientVerifier.IsTrustedClient(pipe, out string clientDescription))
+                    {
+                        Logger.Warn($"Rejected pipe client: {clientDescription}");
+                        try { pipe.Disconnect(); } catch { }
+                        try { pipe.Dispose(); } catch { }
+                        continue;
+                    }
+
                     var client = new ClientConnection
                     {
                         Id = Interlocked.Increment(ref _nextClientId),
@@ -277,7 +289,7 @@ namespace XboxGamingBarHelper.IPC
                         clientCount = _clients.Count;
                     }
 
-                    Logger.Info($"Widget connected via named pipe (client {client.Id}, {clientCount} connected)");
+                    Logger.Info($"Widget connected via named pipe (client {client.Id}, {clientCount} connected, {clientDescription})");
                     Connected?.Invoke(this, EventArgs.Empty);
 
                     Task.Run(() => ReadMessages(client, cancellationToken));
@@ -371,38 +383,42 @@ namespace XboxGamingBarHelper.IPC
         /// </summary>
         private NamedPipeServerStream CreatePipeWithSecurity()
         {
-            // Create security that allows:
-            // 1. Current user (full control)
-            // 2. ALL APPLICATION PACKAGES (S-1-15-2-1) - allows UWP apps to connect
+            // Security:
+            // 1. Current user: full control (the widget's token carries the user SID, and
+            //    the helper's own instance probe connects as the user).
+            // 2. ONLY the GoTweaks package's AppContainer SID (derived from its package family
+            //    name) instead of ALL APPLICATION PACKAGES / ALL RESTRICTED APPLICATION
+            //    PACKAGES, which let ANY installed packaged app talk to this elevated helper.
+            // Every connection is additionally verified (PipeClientVerifier) because the user
+            // ACE alone would still admit any medium-integrity process of the user.
             var pipeSecurity = new PipeSecurity();
 
-            // Allow current user full control
             pipeSecurity.AddAccessRule(new PipeAccessRule(
                 WindowsIdentity.GetCurrent().User,
                 PipeAccessRights.FullControl,
                 AccessControlType.Allow));
 
-            // Allow ALL APPLICATION PACKAGES (this is the key for UWP access)
-            // SID S-1-15-2-1 = ALL_APPLICATION_PACKAGES
-            var allAppPackagesSid = new SecurityIdentifier("S-1-15-2-1");
-            pipeSecurity.AddAccessRule(new PipeAccessRule(
-                allAppPackagesSid,
-                PipeAccessRights.ReadWrite,
-                AccessControlType.Allow));
-
-            // Also allow ALL RESTRICTED APPLICATION PACKAGES for extra compatibility
-            // SID S-1-15-2-2 = ALL_RESTRICTED_APPLICATION_PACKAGES
-            try
+            var packageSid = PipeClientVerifier.GetWidgetPackageSid();
+            bool escapeHatch = PipeClientVerifier.VerificationDisabledByAdmin();
+            if (packageSid != null)
             {
-                var allRestrictedAppPackagesSid = new SecurityIdentifier("S-1-15-2-2");
                 pipeSecurity.AddAccessRule(new PipeAccessRule(
-                    allRestrictedAppPackagesSid,
+                    packageSid,
                     PipeAccessRights.ReadWrite,
                     AccessControlType.Allow));
             }
-            catch
+            if (packageSid == null || escapeHatch)
             {
-                // S-1-15-2-2 may not exist on older Windows versions
+                // Could not derive the package SID, or an admin set the HKLM escape hatch
+                // (see PipeClientVerifier): grant ALL APPLICATION PACKAGES like before the
+                // hardening so the widget can't be locked out by the narrower ACL.
+                Logger.Warn(packageSid == null
+                    ? "Pipe ACL: could not derive the GoTweaks package SID; falling back to ALL APPLICATION PACKAGES (client verification still enforced)"
+                    : "Pipe ACL: HKLM DisablePipeClientVerification=1; also granting ALL APPLICATION PACKAGES");
+                pipeSecurity.AddAccessRule(new PipeAccessRule(
+                    new SecurityIdentifier("S-1-15-2-1"),
+                    PipeAccessRights.ReadWrite,
+                    AccessControlType.Allow));
             }
 
             return new NamedPipeServerStream(
@@ -538,6 +554,223 @@ namespace XboxGamingBarHelper.IPC
         {
             Message = message;
             SourceClientId = sourceClientId;
+        }
+    }
+
+    /// <summary>
+    /// Decides which processes may talk to the elevated helper over the pipe, and derives
+    /// the GoTweaks package SID used in the pipe ACL.
+    /// Trusted: (a) a process whose package family name is GoTweaks' (the widget, or the
+    /// helper launched from the package); (b) XboxGamingBarHelper.exe running from an
+    /// admin-protected GoTweaks location (the deployed helper folder under Program Files,
+    /// or the package's WindowsApps folder); (c) this process.
+    /// Escape hatch for diagnosing lockouts (admin-only to set):
+    /// HKLM\SOFTWARE\GoTweaks\DisablePipeClientVerification = 1 (DWORD). It admits every
+    /// client again (checked on each connection, no restart needed) AND widens the pipe ACL
+    /// back to ALL APPLICATION PACKAGES (applied when a pipe instance is created, so an ACL
+    /// lockout needs a helper restart, e.g. sign out/in or restart the scheduled task).
+    /// </summary>
+    internal static class PipeClientVerifier
+    {
+        private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
+
+        // Same family name the rest of the helper uses for LocalState paths
+        // (Identity Name="PlayandBuildCustom.10365195AA1EC" Publisher="CN=dg").
+        internal const string FallbackPackageFamilyName = Services.HelperDeploymentService.FallbackPackageFamilyName;
+        private const string HelperExeName = "XboxGamingBarHelper.exe";
+
+        private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+        private const int ERROR_SUCCESS = 0;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetNamedPipeClientProcessId(Microsoft.Win32.SafeHandles.SafePipeHandle pipe, out uint clientProcessId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, uint processId);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool QueryFullProcessImageName(IntPtr process, int flags, StringBuilder exeName, ref int size);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetPackageFamilyName(IntPtr process, ref uint packageFamilyNameLength, StringBuilder packageFamilyName);
+
+        [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
+        private static extern int DeriveAppContainerSidFromAppContainerName(string appContainerName, out IntPtr appContainerSid);
+
+        [DllImport("advapi32.dll")]
+        private static extern IntPtr FreeSid(IntPtr sid);
+
+        private static string cachedFamilyName;
+        private static bool loggedSid;
+
+        internal static string GetOwnPackageFamilyName()
+        {
+            if (cachedFamilyName != null) return cachedFamilyName;
+            string name = null;
+            try { name = global::Windows.ApplicationModel.Package.Current.Id.FamilyName; }
+            catch { name = null; }
+            cachedFamilyName = string.IsNullOrEmpty(name) ? FallbackPackageFamilyName : name;
+            return cachedFamilyName;
+        }
+
+        /// <summary>The widget package's AppContainer SID, or null if it can't be derived.</summary>
+        internal static SecurityIdentifier GetWidgetPackageSid()
+        {
+            IntPtr sidPtr = IntPtr.Zero;
+            try
+            {
+                int hr = DeriveAppContainerSidFromAppContainerName(GetOwnPackageFamilyName().ToLowerInvariant(), out sidPtr);
+                if (hr != 0 || sidPtr == IntPtr.Zero)
+                {
+                    Logger.Warn($"DeriveAppContainerSidFromAppContainerName failed (hr=0x{hr:X8})");
+                    return null;
+                }
+                var sid = new SecurityIdentifier(sidPtr);
+                if (!loggedSid)
+                {
+                    loggedSid = true;
+                    Logger.Info($"Pipe ACL: GoTweaks package SID {sid.Value} ({GetOwnPackageFamilyName()})");
+                }
+                return sid;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Could not derive GoTweaks package SID: {ex.Message}");
+                return null;
+            }
+            finally
+            {
+                if (sidPtr != IntPtr.Zero) { try { FreeSid(sidPtr); } catch { } }
+            }
+        }
+
+        internal static bool VerificationDisabledByAdmin()
+        {
+            try
+            {
+                // Always the 64-bit view, so an x86 build reads the same key the docs name.
+                using (var baseKey = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry64))
+                using (var key = baseKey.OpenSubKey(@"SOFTWARE\GoTweaks"))
+                {
+                    object v = key?.GetValue("DisablePipeClientVerification");
+                    return v is int i && i == 1;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        internal static bool IsTrustedClient(NamedPipeServerStream pipe, out string description)
+        {
+            description = "unknown client";
+            uint pid;
+            try
+            {
+                if (!GetNamedPipeClientProcessId(pipe.SafePipeHandle, out pid))
+                {
+                    description = $"GetNamedPipeClientProcessId failed (err {Marshal.GetLastWin32Error()})";
+                    return VerificationDisabledByAdmin();
+                }
+            }
+            catch (Exception ex)
+            {
+                description = $"client PID lookup threw: {ex.Message}";
+                return VerificationDisabledByAdmin();
+            }
+
+            if (pid == (uint)System.Diagnostics.Process.GetCurrentProcess().Id)
+            {
+                description = $"pid {pid} (self)";
+                return true;
+            }
+
+            IntPtr hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+            if (hProcess == IntPtr.Zero)
+            {
+                description = $"pid {pid}: OpenProcess failed (err {Marshal.GetLastWin32Error()})";
+                return VerificationDisabledByAdmin();
+            }
+
+            try
+            {
+                string familyName = null;
+                try
+                {
+                    uint len = 256;
+                    var sb = new StringBuilder((int)len);
+                    if (GetPackageFamilyName(hProcess, ref len, sb) == ERROR_SUCCESS)
+                    {
+                        familyName = sb.ToString();
+                    }
+                }
+                catch { familyName = null; }
+
+                string imagePath = null;
+                try
+                {
+                    int size = 1024;
+                    var sb = new StringBuilder(size);
+                    if (QueryFullProcessImageName(hProcess, 0, sb, ref size))
+                    {
+                        imagePath = sb.ToString(0, size);
+                    }
+                }
+                catch { imagePath = null; }
+
+                description = $"pid {pid}, package={familyName ?? "(none)"}, image={imagePath ?? "?"}";
+
+                if (!string.IsNullOrEmpty(familyName)
+                    && string.Equals(familyName, GetOwnPackageFamilyName(), StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+
+                if (!string.IsNullOrEmpty(imagePath) && IsTrustedHelperImage(imagePath))
+                {
+                    return true;
+                }
+
+                if (VerificationDisabledByAdmin())
+                {
+                    description += " (allowed: verification disabled by HKLM policy)";
+                    return true;
+                }
+                return false;
+            }
+            finally
+            {
+                CloseHandle(hProcess);
+            }
+        }
+
+        private static bool IsTrustedHelperImage(string imagePath)
+        {
+            try
+            {
+                string fullPath = Path.GetFullPath(imagePath);
+                if (!string.Equals(Path.GetFileName(fullPath), HelperExeName, StringComparison.OrdinalIgnoreCase))
+                    return false;
+                string dir = Path.GetDirectoryName(fullPath) ?? "";
+
+                // Deployed helper in its admin-only folder.
+                string deployed = Path.GetFullPath(Services.HelperDeploymentService.HelperFolder).TrimEnd('\\');
+                if (Services.HelperDeploymentService.IsHelperFolderAdminProtected
+                    && string.Equals(dir.TrimEnd('\\'), deployed, StringComparison.OrdinalIgnoreCase))
+                    return true;
+
+                // Helper inside the installed package (WindowsApps is admin/TrustedInstaller-owned).
+                if (Services.HelperDeploymentService.IsTrustedPackageSourceDirectory(dir))
+                    return true;
+            }
+            catch
+            {
+            }
+            return false;
         }
     }
 }
