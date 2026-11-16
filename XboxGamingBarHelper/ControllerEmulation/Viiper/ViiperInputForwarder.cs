@@ -1982,7 +1982,7 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
                             // No physical slot resolved yet (pad not enumerated at Start,
                             // HidHide cycle-port, resume, late plug-in). Re-probe about once
                             // a second instead of sleeping here forever.
-                            long nowTicks = DateTime.UtcNow.Ticks;
+                            nowTicks = DateTime.UtcNow.Ticks;
                             if (nowTicks - lastPhysicalRedetectTicks >= TimeSpan.TicksPerSecond)
                             {
                                 lastPhysicalRedetectTicks = nowTicks;
