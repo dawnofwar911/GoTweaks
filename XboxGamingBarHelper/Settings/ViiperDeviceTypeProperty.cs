@@ -26,6 +26,12 @@ namespace XboxGamingBarHelper.Settings
             {
                 if (string.Equals(value, "dualsenseedge", System.StringComparison.OrdinalIgnoreCase))
                 {
+                    // One-time migration: the top-level "dualsenseedge" value only came from the
+                    // short-lived default in 436a73a; the widget never offers it at top level
+                    // (DualSense Edge is selected as "sony" + Sony sub-device "dualsense-edge",
+                    // which is unaffected). Persist the migrated value so the saved setting,
+                    // the helper and the widget agree instead of re-coercing on every start.
+                    LocalSettingsHelper.SetValue(SettingsKey, Default);
                     return Default;
                 }
                 return value;
