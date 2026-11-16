@@ -698,6 +698,7 @@ namespace XboxGamingBarHelper
                 return;
             }
 
+            bool anyInjected = false;
             try
             {
                 var parts = shortcut.Split(new[] { '+' }, StringSplitOptions.RemoveEmptyEntries);
@@ -824,60 +825,81 @@ namespace XboxGamingBarHelper
                     return;
                 }
 
-                // Press modifiers
-                if (modifierKeys.Count > 0)
+                // Press and release in stages, but track exactly what went down so that any
+                // failure part-way always releases those keys (never leaves Ctrl/Alt/Shift
+                // stuck), and only fall back to SendInput when nothing was injected yet
+                // (otherwise the fallback replayed the whole combo and the action fired twice).
+                Func<ushort, InjectedInputKeyOptions, InjectedInputKeyboardInfo> makeKey = (k, opts) => new InjectedInputKeyboardInfo
                 {
-                    var modDown = modifierKeys.Select(k => new InjectedInputKeyboardInfo
+                    VirtualKey = k,
+                    ScanCode = (ushort)Windows.User32.MapVirtualKey(k, Windows.User32.MAPVK_VK_TO_VSC),
+                    KeyOptions = opts
+                };
+                var pressedMods = new List<ushort>();
+                var pressedKeys = new List<ushort>();
+                try
+                {
+                    // Press modifiers
+                    if (modifierKeys.Count > 0)
                     {
-                        VirtualKey = k,
-                        ScanCode = (ushort)Windows.User32.MapVirtualKey(k, Windows.User32.MAPVK_VK_TO_VSC),
-                        KeyOptions = InjectedInputKeyOptions.None
-                    }).ToList();
-                    inputInjector.InjectKeyboardInput(modDown);
-                    Thread.Sleep(20);
+                        var modDown = modifierKeys.Select(k => makeKey(k, InjectedInputKeyOptions.None)).ToList();
+                        // Track before injecting: a release of a key that never went down is
+                        // harmless, a missed release is a stuck modifier.
+                        pressedMods.AddRange(modifierKeys);
+                        inputInjector.InjectKeyboardInput(modDown);
+                        anyInjected = true;
+                        Thread.Sleep(20);
+                    }
+
+                    // Press main keys, hold, release in reverse order
+                    if (mainKeys.Count > 0)
+                    {
+                        var keyDown = mainKeys.Select(k => makeKey(k, InjectedInputKeyOptions.None)).ToList();
+                        pressedKeys.AddRange(mainKeys);
+                        inputInjector.InjectKeyboardInput(keyDown);
+                        anyInjected = true;
+                        Thread.Sleep(50); // Hold time for application message loops to register the combination
+
+                        var keyUp = mainKeys.AsEnumerable().Reverse().Select(k => makeKey(k, InjectedInputKeyOptions.KeyUp)).ToList();
+                        inputInjector.InjectKeyboardInput(keyUp);
+                        pressedKeys.Clear();
+                        Thread.Sleep(20);
+                    }
+
+                    // Release modifiers in reverse order
+                    if (pressedMods.Count > 0)
+                    {
+                        var modUp = pressedMods.AsEnumerable().Reverse().Select(k => makeKey(k, InjectedInputKeyOptions.KeyUp)).ToList();
+                        inputInjector.InjectKeyboardInput(modUp);
+                        pressedMods.Clear();
+                    }
                 }
-
-                // Press main keys
-                if (mainKeys.Count > 0)
+                finally
                 {
-                    var keyDown = mainKeys.Select(k => new InjectedInputKeyboardInfo
+                    // Release anything still held (main keys first, then modifiers), each key
+                    // individually so one failure can't block the rest.
+                    foreach (var k in pressedKeys.AsEnumerable().Reverse().Concat(pressedMods.AsEnumerable().Reverse()))
                     {
-                        VirtualKey = k,
-                        ScanCode = (ushort)Windows.User32.MapVirtualKey(k, Windows.User32.MAPVK_VK_TO_VSC),
-                        KeyOptions = InjectedInputKeyOptions.None
-                    }).ToList();
-                    inputInjector.InjectKeyboardInput(keyDown);
-                    Thread.Sleep(50); // Hold time for application message loops to register the combination
-
-                    // Release main keys in reverse order
-                    var keyUp = mainKeys.AsEnumerable().Reverse().Select(k => new InjectedInputKeyboardInfo
-                    {
-                        VirtualKey = k,
-                        ScanCode = (ushort)Windows.User32.MapVirtualKey(k, Windows.User32.MAPVK_VK_TO_VSC),
-                        KeyOptions = InjectedInputKeyOptions.KeyUp
-                    }).ToList();
-                    inputInjector.InjectKeyboardInput(keyUp);
-                    Thread.Sleep(20);
-                }
-
-                // Release modifiers in reverse order
-                if (modifierKeys.Count > 0)
-                {
-                    var modUp = modifierKeys.AsEnumerable().Reverse().Select(k => new InjectedInputKeyboardInfo
-                    {
-                        VirtualKey = k,
-                        ScanCode = (ushort)Windows.User32.MapVirtualKey(k, Windows.User32.MAPVK_VK_TO_VSC),
-                        KeyOptions = InjectedInputKeyOptions.KeyUp
-                    }).ToList();
-                    inputInjector.InjectKeyboardInput(modUp);
+                        try { inputInjector.InjectKeyboardInput(new[] { makeKey(k, InjectedInputKeyOptions.KeyUp) }); }
+                        catch (Exception releaseEx) { Logger.Warn($"Failed to release key 0x{k:X2} after shortcut error: {releaseEx.Message}"); }
+                    }
                 }
 
                 Logger.Info($"Sent keyboard shortcut via InputInjector: {shortcut} (modifiers: {modifierKeys.Count}, keys: {mainKeys.Count})");
             }
             catch (Exception ex)
             {
-                Logger.Warn($"Error sending keyboard shortcut '{shortcut}' via InputInjector: {ex.Message} - falling back to User32.SendKeyboardShortcut");
-                Windows.User32.SendKeyboardShortcut(shortcut);
+                if (!anyInjected)
+                {
+                    Logger.Warn($"Error sending keyboard shortcut '{shortcut}' via InputInjector: {ex.Message} - falling back to User32.SendKeyboardShortcut");
+                    Windows.User32.SendKeyboardShortcut(shortcut);
+                }
+                else
+                {
+                    // Keys were already (partly) injected and have been released above; replaying
+                    // the whole combo via SendInput could trigger the action twice.
+                    Logger.Warn($"Error sending keyboard shortcut '{shortcut}' via InputInjector after keys were injected: {ex.Message} - not replaying via SendInput");
+                }
             }
         }
     }
