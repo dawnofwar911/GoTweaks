@@ -186,13 +186,9 @@ namespace XboxGamingBarHelper
                 // Exit the helper
                 _isShuttingDown = true;
 
-                // Release mutex before exiting to ensure clean restart
-                try
-                {
-                    singleInstanceMutex?.ReleaseMutex();
-                    singleInstanceMutex?.Dispose();
-                }
-                catch { /* Ignore mutex errors during shutdown */ }
+                // Don't ReleaseMutex here: this isn't the thread that acquired it (that always
+                // threw and was swallowed). The kernel releases (abandons) it when the process
+                // exits, and the next helper already handles AbandonedMutexException.
 
                 Environment.Exit(0);
             }
