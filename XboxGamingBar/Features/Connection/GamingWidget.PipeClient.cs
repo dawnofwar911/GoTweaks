@@ -96,12 +96,40 @@ namespace XboxGamingBar
                 // pending initialization are populated.
                 if (message.TryGetValue("HelperManagersReady", out object readyObj))
                 {
-                    Logger.Info("Helper signaled HelperManagersReady - syncing properties and updating setup tab status");
                     TryRunOnDispatcher(async () =>
                     {
-                        HideConnectionBanner();
-                        await properties.Sync();
-                        UpdateSetupTabStatus();
+                        try
+                        {
+                            HideConnectionBanner();
+                            // If the startup/reconnect sync is still running (NotReady retry
+                            // loop), let it finish: it will succeed now and runs with the
+                            // isApplyingHelperUpdate guard and post-sync reconciliation. A
+                            // second concurrent Sync() here raced it and could save helper
+                            // values into the profile.
+                            if (properties.IsSyncInProgress)
+                            {
+                                Logger.Info("Helper signaled HelperManagersReady - sync already in progress, not starting another");
+                            }
+                            else
+                            {
+                                Logger.Info("Helper signaled HelperManagersReady - syncing properties and updating setup tab status");
+                                bool wasApplying = isApplyingHelperUpdate;
+                                isApplyingHelperUpdate = true;
+                                try
+                                {
+                                    await properties.Sync();
+                                }
+                                finally
+                                {
+                                    isApplyingHelperUpdate = wasApplying;
+                                }
+                            }
+                            UpdateSetupTabStatus();
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Warn($"HelperManagersReady sync threw: {ex.Message}");
+                        }
                     }, "PipeClient_MessageReceived/managersReady");
                     return;
                 }
