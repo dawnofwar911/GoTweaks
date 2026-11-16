@@ -446,7 +446,7 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
                 guideOnlyPhysicalXInputSlot = -1;
             }
 
-            uint xinputIdx = ViiperInputForwarder.DetectPhysicalXInputIndex();
+            uint xinputIdx = ViiperInputForwarder.DetectPhysicalXInputIndex(activeDeviceType);
             forwarder.SetInputSource(ResolveInputSource());
             forwarder.SetGyroSource(ResolveGyroSource());
             forwarder.SetJoyconGyroPerHalf(settingsManager?.ViiperJoyconGyroPerHalf?.Value ?? false);
@@ -981,7 +981,7 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
             }
 
             // Start forwarding physical input -> virtual device.
-            uint xinputIdx = ViiperInputForwarder.DetectPhysicalXInputIndex();
+            uint xinputIdx = ViiperInputForwarder.DetectPhysicalXInputIndex(activeDeviceType);
             forwarder.SetInputSource(ResolveInputSource());
             forwarder.SetGyroSource(ResolveGyroSource());
             forwarder.SetJoyconGyroPerHalf(settingsManager?.ViiperJoyconGyroPerHalf?.Value ?? false);
@@ -1026,7 +1026,7 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
             // xinputFresh=1 then errors (build 2100/2101 logs, ViGEm era — the
             // slot-occupancy mechanics are identical for the VIIPER pad).
             System.Threading.Thread.Sleep(150);
-            uint repinnedIdx = ViiperInputForwarder.DetectPhysicalXInputIndex();
+            uint repinnedIdx = ViiperInputForwarder.DetectPhysicalXInputIndex(activeDeviceType);
             if (repinnedIdx != xinputIdx)
             {
                 Logger.Info($"VIIPER post-Start re-pin: physicalIndex {xinputIdx} -> {repinnedIdx} (guide-only pad slot freed)");
@@ -1127,7 +1127,16 @@ namespace XboxGamingBarHelper.ControllerEmulation.Viiper
 
             if (string.Equals(value, "LegionHid", StringComparison.OrdinalIgnoreCase))
             {
-                return ViiperInputSourceKind.LegionHid;
+                // "LegionHid" is also the out-of-box default (ViiperInputSourceProperty.Default),
+                // so only honour it on Legion hardware. On other handhelds (ROG Ally, MSI Claw,
+                // GPD, ...) there is no Legion HID monitor and the emulated pad would sit
+                // neutral; read XInput instead.
+                if (legionManager?.LegionGoDetected?.Value == true)
+                {
+                    return ViiperInputSourceKind.LegionHid;
+                }
+                Logger.Info("VIIPER input source LegionHid requested but no Legion Go detected — using XInput");
+                return ViiperInputSourceKind.XInput;
             }
 
             if (string.Equals(value, "XInput", StringComparison.OrdinalIgnoreCase))
